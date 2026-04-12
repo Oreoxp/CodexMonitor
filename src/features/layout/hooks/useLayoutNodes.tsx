@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { buildGitNodes } from "./layoutNodes/buildGitNodes";
 import type { GitLayoutNodesOptions } from "./layoutNodes/buildGitNodes";
 import { buildPrimaryNodes } from "./layoutNodes/buildPrimaryNodes";
@@ -7,6 +8,7 @@ import type { SecondaryLayoutNodesOptions } from "./layoutNodes/buildSecondaryNo
 import type { LayoutNodesOptions, LayoutNodesResult } from "./layoutNodes/types";
 
 export function useLayoutNodes(options: LayoutNodesOptions): LayoutNodesResult {
+  const { t } = useTranslation();
   const primaryOptions: PrimaryLayoutNodesOptions = options.primary;
   const gitOptions: GitLayoutNodesOptions = options.git;
   const secondaryOptions: SecondaryLayoutNodesOptions = options.secondary;
@@ -14,6 +16,6 @@ export function useLayoutNodes(options: LayoutNodesOptions): LayoutNodesResult {
   return {
     ...buildPrimaryNodes(primaryOptions),
     ...buildGitNodes(gitOptions),
-    ...buildSecondaryNodes(secondaryOptions),
+    ...buildSecondaryNodes(secondaryOptions, t),
   };
 }

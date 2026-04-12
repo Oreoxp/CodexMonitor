@@ -7,6 +7,8 @@ import type {
   LayoutSecondarySurface,
 } from "./types";
 
+export type TFunc = (key: string) => string;
+
 export type SecondaryLayoutNodesOptions = LayoutSecondarySurface;
 
 type SecondaryLayoutNodes = Pick<
@@ -51,17 +53,19 @@ function buildCompactEmptyNode({
   title,
   description,
   onGoProjects,
+  t,
 }: {
   title: string;
   description: string;
   onGoProjects: () => void;
+  t: TFunc;
 }) {
   return (
     <div className="compact-empty">
       <h3>{title}</h3>
       <p>{description}</p>
       <button className="ghost" onClick={onGoProjects}>
-        Go to Projects
+        {t('compactEmpty.goToProjects')}
       </button>
     </div>
   );
@@ -69,6 +73,7 @@ function buildCompactEmptyNode({
 
 function buildCompactGitBackNode(
   compactNavProps: SecondaryLayoutNodesOptions["compactNavProps"],
+  t: TFunc,
 ) {
   const compactGitDiffActive =
     compactNavProps.centerMode === "diff" &&
@@ -81,7 +86,7 @@ function buildCompactGitBackNode(
         className={`compact-git-switch-button${compactGitDiffActive ? "" : " active"}`}
         onClick={compactNavProps.onBackFromDiff}
       >
-        Files
+        {t('compactEmpty.files')}
       </button>
       <button
         type="button"
@@ -89,13 +94,13 @@ function buildCompactGitBackNode(
         onClick={compactNavProps.onShowSelectedDiff}
         disabled={!compactNavProps.hasActiveGitDiffs}
       >
-        Diff
+        {t('compactEmpty.diff')}
       </button>
     </div>
   );
 }
 
-export function buildSecondaryNodes(options: SecondaryLayoutNodesOptions): SecondaryLayoutNodes {
+export function buildSecondaryNodes(options: SecondaryLayoutNodesOptions, t: TFunc): SecondaryLayoutNodes {
   const planPanelNode = <PlanPanel {...options.planPanelProps} />;
   const terminalPanelNode = buildTerminalPanelNode(options.terminalState);
 
@@ -109,18 +114,20 @@ export function buildSecondaryNodes(options: SecondaryLayoutNodesOptions): Secon
   const { debugPanelNode, debugPanelFullNode } = buildDebugPanels(options.debugPanelProps);
 
   const compactEmptyCodexNode = buildCompactEmptyNode({
-    title: "No workspace selected",
-    description: "Choose a project to start chatting.",
+    title: t('compactEmpty.noWorkspace'),
+    description: t('compactEmpty.chooseProject'),
     onGoProjects: options.compactNavProps.onGoProjects,
+    t,
   });
 
   const compactEmptyGitNode = buildCompactEmptyNode({
-    title: "No workspace selected",
-    description: "Select a project to inspect diffs.",
+    title: t('compactEmpty.noWorkspace'),
+    description: t('compactEmpty.selectProject'),
     onGoProjects: options.compactNavProps.onGoProjects,
+    t,
   });
 
-  const compactGitBackNode = buildCompactGitBackNode(options.compactNavProps);
+  const compactGitBackNode = buildCompactGitBackNode(options.compactNavProps, t);
 
   return {
     planPanelNode,

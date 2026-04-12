@@ -27,7 +27,7 @@ const EXPECTED_DAEMON_MODE: &str = "tcp";
 const CURRENT_APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:4732";
 const REMOTE_TOKEN_PLACEHOLDER: &str = "<remote-backend-token>";
-const APP_IDENTIFIER: &str = "com.dimillian.codexmonitor";
+const APP_IDENTIFIER: &str = "com.opencrab.app";
 const DAEMON_RPC_TIMEOUT: Duration = Duration::from_millis(700);
 
 #[derive(Debug, Clone)]

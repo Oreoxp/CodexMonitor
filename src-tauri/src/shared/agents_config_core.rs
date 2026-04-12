@@ -680,7 +680,7 @@ fn resolve_managed_agent_config_relative_path(
 
     let Some(relative_path) = managed_relative_path_from_config(config_file.as_str()) else {
         return Err(format!(
-            "agent '{name}' config_file is not managed by CodexMonitor"
+            "agent '{name}' config_file is not managed by OpenCrab"
         ));
     };
 

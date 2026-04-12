@@ -1,13 +1,13 @@
 import { useCallback, useRef } from "react";
-import { useUpdater } from "../../update/hooks/useUpdater";
 import { useAgentSoundNotifications } from "../../notifications/hooks/useAgentSoundNotifications";
 import { useAgentSystemNotifications } from "../../notifications/hooks/useAgentSystemNotifications";
 import { useWindowFocusState } from "../../layout/hooks/useWindowFocusState";
-import { useTauriEvent } from "./useTauriEvent";
 import { playNotificationSound } from "../../../utils/notificationSounds";
-import { subscribeUpdaterCheck } from "../../../services/events";
 import { sendNotification } from "../../../services/tauri";
 import type { DebugEntry } from "../../../types";
+import type { UpdateState, PostUpdateNoticeState } from "../../update/hooks/useUpdater";
+
+const NOOP_STATE: UpdateState = { stage: "idle" };
 
 type Params = {
   enabled?: boolean;
@@ -24,8 +24,6 @@ type Params = {
 };
 
 export function useUpdaterController({
-  enabled = true,
-  autoCheckOnMount = true,
   notificationSoundsEnabled,
   systemNotificationsEnabled,
   subagentSystemNotificationsEnabled,
@@ -36,44 +34,8 @@ export function useUpdaterController({
   successSoundUrl,
   errorSoundUrl,
 }: Params) {
-  const {
-    state: updaterState,
-    startUpdate,
-    checkForUpdates,
-    dismiss,
-    postUpdateNotice,
-    dismissPostUpdateNotice,
-  } = useUpdater({
-    enabled,
-    autoCheckOnMount,
-    onDebug,
-  });
   const isWindowFocused = useWindowFocusState();
   const nextTestSoundIsError = useRef(false);
-
-  const subscribeUpdaterCheckEvent = useCallback(
-    (handler: () => void) =>
-      subscribeUpdaterCheck(handler, {
-        onError: (error) => {
-          onDebug({
-            id: `${Date.now()}-client-updater-menu-error`,
-            timestamp: Date.now(),
-            source: "error",
-            label: "updater/menu-error",
-            payload: error instanceof Error ? error.message : String(error),
-          });
-        },
-      }),
-    [onDebug],
-  );
-
-  useTauriEvent(
-    subscribeUpdaterCheckEvent,
-    () => {
-      void checkForUpdates({ announceNoUpdate: true });
-    },
-    { enabled },
-  );
 
   useAgentSoundNotifications({
     enabled: notificationSoundsEnabled,
@@ -105,7 +67,7 @@ export function useUpdaterController({
     }
     void sendNotification(
       "Test Notification",
-      "This is a test notification from CodexMonitor.",
+      "This is a test notification from 小螃蟹.",
     ).catch((error) => {
       onDebug({
         id: `${Date.now()}-client-notification-test-error`,
@@ -117,13 +79,15 @@ export function useUpdaterController({
     });
   }, [onDebug, systemNotificationsEnabled]);
 
+  const noop = useCallback(async () => {}, []);
+
   return {
-    updaterState,
-    startUpdate,
-    checkForUpdates,
-    dismissUpdate: dismiss,
-    postUpdateNotice,
-    dismissPostUpdateNotice,
+    updaterState: NOOP_STATE,
+    startUpdate: noop,
+    checkForUpdates: noop,
+    dismissUpdate: noop,
+    postUpdateNotice: null as PostUpdateNoticeState,
+    dismissPostUpdateNotice: noop,
     handleTestNotificationSound,
     handleTestSystemNotification,
   };

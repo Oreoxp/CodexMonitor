@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Codex Monitor",
+  "productName": "小螃蟹",
   "version": "0.7.68",
-  "identifier": "com.dimillian.codexmonitor",
+  "identifier": "com.opencrab.app",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "macOSPrivateApi": true,
     "windows": [
       {
-        "title": "Codex Monitor",
+        "title": "小螃蟹",
         "width": 1200,
         "height": 700,
         "minWidth": 360,
@@ -42,7 +42,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "createUpdaterArtifacts": true,
+
     "iOS": {
       "frameworks": [
         "libz.tbd",
@@ -61,12 +61,5 @@
       "infoPlist": "./Info.plist"
     }
   },
-  "plugins": {
-    "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY0QTgzQUU0QTc2MEVBNDMKUldSRDZtQ241RHFvOURJbm1KeC81aEZaOXlhZHlHd2NEZVpPVWs5NjdjOFNhUFEyZGJpTkV0S2YK",
-      "endpoints": [
-        "https://github.com/Dimillian/CodexMonitor/releases/latest/download/latest.json"
-      ]
-    }
-  }
+  "plugins": {}
 }
