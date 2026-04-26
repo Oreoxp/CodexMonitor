@@ -648,6 +648,8 @@ pub(crate) struct AppSettings {
     pub(crate) open_app_targets: Vec<OpenAppTarget>,
     #[serde(default = "default_selected_open_app_id", rename = "selectedOpenAppId")]
     pub(crate) selected_open_app_id: String,
+    #[serde(default = "default_transport_mode", rename = "transportMode")]
+    pub(crate) transport_mode: TransportMode,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -660,6 +662,22 @@ pub(crate) enum BackendMode {
 impl Default for BackendMode {
     fn default() -> Self {
         default_backend_mode()
+    }
+}
+
+/// Transport mode for communicating with the Codex backend process.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum TransportMode {
+    /// Communicate via stdin/stdout pipes (default).
+    Stdio,
+    /// Communicate via WebSocket.
+    WebSocket,
+}
+
+impl Default for TransportMode {
+    fn default() -> Self {
+        default_transport_mode()
     }
 }
 
@@ -689,6 +707,10 @@ fn default_backend_mode() -> BackendMode {
     } else {
         BackendMode::Local
     }
+}
+
+fn default_transport_mode() -> TransportMode {
+    TransportMode::WebSocket
 }
 
 fn default_remote_backend_host() -> String {
@@ -1199,6 +1221,7 @@ impl Default for AppSettings {
             global_worktrees_folder: None,
             open_app_targets: default_open_app_targets(),
             selected_open_app_id: default_selected_open_app_id(),
+            transport_mode: default_transport_mode(),
         }
     }
 }

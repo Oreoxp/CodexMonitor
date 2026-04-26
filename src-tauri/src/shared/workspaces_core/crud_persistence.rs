@@ -9,7 +9,6 @@ use uuid::Uuid;
 use crate::backend::app_server::WorkspaceSession;
 use crate::codex::args::resolve_workspace_codex_args;
 use crate::codex::home::resolve_workspace_codex_home;
-use crate::shared::process_core::kill_child_process_tree;
 use crate::shared::{git_core, worktree_core};
 use crate::storage::write_workspaces;
 use crate::types::{AppSettings, WorkspaceEntry, WorkspaceInfo, WorkspaceKind, WorkspaceSettings};
@@ -83,8 +82,7 @@ where
             workspaces.remove(&entry.id);
         }
         if spawned_new_session {
-            let mut child = session.child.lock().await;
-            kill_child_process_tree(&mut child).await;
+            session.kill().await;
         }
         return Err(error);
     }
@@ -237,8 +235,7 @@ where
             workspaces.remove(&entry.id);
         }
         if spawned_new_session {
-            let mut child = session.child.lock().await;
-            kill_child_process_tree(&mut child).await;
+            session.kill().await;
         }
         let _ = tokio::fs::remove_dir_all(&destination_path).await;
         return Err(error);
@@ -402,8 +399,7 @@ where
             workspaces.remove(&entry.id);
         }
         if spawned_new_session {
-            let mut child = session.child.lock().await;
-            kill_child_process_tree(&mut child).await;
+            session.kill().await;
         }
         let _ = tokio::fs::remove_dir_all(&clone_path).await;
         return Err(error);

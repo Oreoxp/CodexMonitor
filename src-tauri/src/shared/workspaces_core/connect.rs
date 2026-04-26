@@ -9,7 +9,6 @@ use tokio::sync::Mutex;
 use crate::backend::app_server::WorkspaceSession;
 use crate::codex::args::resolve_workspace_codex_args;
 use crate::codex::home::resolve_workspace_codex_home;
-use crate::shared::process_core::kill_child_process_tree;
 use crate::types::{AppSettings, WorkspaceEntry};
 
 use super::helpers::resolve_entry_and_parent;
@@ -21,8 +20,7 @@ pub(super) fn workspace_session_spawn_lock() -> &'static Mutex<()> {
 }
 
 async fn session_process_is_alive(session: &Arc<WorkspaceSession>) -> bool {
-    let mut child = session.child.lock().await;
-    matches!(child.try_wait(), Ok(None))
+    session.is_alive().await
 }
 
 async fn remove_session_references(
@@ -118,8 +116,7 @@ pub(super) async fn kill_session_by_id(
         if still_referenced {
             return;
         }
-        let mut child = session.child.lock().await;
-        kill_child_process_tree(&mut child).await;
+        session.kill().await;
     }
 }
 
@@ -169,8 +166,9 @@ mod tests {
 
         Arc::new(WorkspaceSession {
             codex_args: None,
-            child: Mutex::new(child),
-            stdin: Mutex::new(stdin),
+            child: Some(Mutex::new(child)),
+            stdin: Some(Mutex::new(stdin)),
+            transport: None,
             pending: Mutex::new(HashMap::new()),
             request_context: Mutex::new(HashMap::new()),
             thread_workspace: Mutex::new(HashMap::new()),

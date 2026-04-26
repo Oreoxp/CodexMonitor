@@ -7,13 +7,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::timeout;
 
 use crate::backend::events::{AppServerEvent, EventSink};
 use crate::codex::args::parse_codex_args;
+use crate::codex_transport::{CodexTransport, CodexTransportKind};
 use crate::shared::process_core::{kill_child_process_tree, tokio_command};
 use crate::types::WorkspaceEntry;
 
@@ -433,8 +434,15 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub(crate) struct WorkspaceSession {
     pub(crate) codex_args: Option<String>,
-    pub(crate) child: Mutex<Child>,
-    pub(crate) stdin: Mutex<ChildStdin>,
+    /// Direct child handle.  Only populated for legacy/test sessions that
+    /// pre-date the transport abstraction. Production code constructs sessions
+    /// via the transport factory and leaves this `None` — the real process
+    /// lifecycle is owned by `transport`.
+    pub(crate) child: Option<Mutex<Child>>,
+    /// Direct stdin handle.  Same legacy/test caveat as `child`.
+    pub(crate) stdin: Option<Mutex<ChildStdin>>,
+    /// The underlying transport (used for send/recv). Supports both Stdio and WebSocket.
+    pub(crate) transport: Option<Arc<dyn CodexTransport>>,
     pub(crate) pending: Mutex<HashMap<u64, oneshot::Sender<Value>>>,
     pub(crate) request_context: Mutex<HashMap<u64, RequestContext>>,
     pub(crate) thread_workspace: Mutex<HashMap<String, String>>,
@@ -481,14 +489,49 @@ impl WorkspaceSession {
         self.workspace_ids.lock().await.iter().cloned().collect()
     }
 
+    /// Check whether the underlying Codex process is still alive.
+    pub(crate) async fn is_alive(&self) -> bool {
+        if let Some(ref transport) = self.transport {
+            return transport.is_alive().await;
+        }
+        if let Some(ref child_mutex) = self.child {
+            let mut child = child_mutex.lock().await;
+            return matches!(child.try_wait(), Ok(None));
+        }
+        false
+    }
+
+    /// Kill the underlying Codex process.
+    pub(crate) async fn kill(&self) {
+        if let Some(ref transport) = self.transport {
+            let _ = transport.close().await;
+            return;
+        }
+        if let Some(ref child_mutex) = self.child {
+            let mut child = child_mutex.lock().await;
+            kill_child_process_tree(&mut child).await;
+        }
+    }
+
     async fn write_message(&self, value: Value) -> Result<(), String> {
-        let mut stdin = self.stdin.lock().await;
-        let mut line = serde_json::to_string(&value).map_err(|e| e.to_string())?;
-        line.push('\n');
-        stdin
-            .write_all(line.as_bytes())
-            .await
-            .map_err(|e| e.to_string())
+        let line = serde_json::to_string(&value).map_err(|e| e.to_string())?;
+        if let Some(ref transport) = self.transport {
+            return transport
+                .send(&line)
+                .await
+                .map_err(|e| e.to_string());
+        }
+        // Legacy/test fallback: write directly to the child process stdin.
+        if let Some(ref stdin_mutex) = self.stdin {
+            let mut stdin = stdin_mutex.lock().await;
+            let mut line = line;
+            line.push('\n');
+            return stdin
+                .write_all(line.as_bytes())
+                .await
+                .map_err(|e| e.to_string());
+        }
+        Err("workspace session has no transport or stdin handle".to_string())
     }
 
     pub(crate) async fn send_request(&self, method: &str, params: Value) -> Result<Value, String> {
@@ -746,39 +789,24 @@ pub(crate) async fn check_codex_installation(
     })
 }
 
-pub(crate) async fn spawn_workspace_session<E: EventSink>(
-    entry: WorkspaceEntry,
-    default_codex_bin: Option<String>,
+/// Internal helper: set up the reader loop, stderr forwarding, and initialize
+/// handshake for a `WorkspaceSession`.  Shared by both stdio and websocket
+/// spawn paths.
+async fn setup_session_runtime<E: EventSink>(
+    transport: Arc<dyn CodexTransport>,
+    mut stderr_rx: mpsc::UnboundedReceiver<String>,
+    entry: &WorkspaceEntry,
     codex_args: Option<String>,
-    codex_home: Option<PathBuf>,
-    client_version: String,
+    client_version: &str,
     event_sink: E,
 ) -> Result<Arc<WorkspaceSession>, String> {
-    let codex_bin = default_codex_bin;
-    let _ = check_codex_installation(codex_bin.clone()).await?;
-
-    let mut command = build_codex_command_with_bin(
-        codex_bin,
-        codex_args.as_deref(),
-        vec!["app-server".to_string()],
-    )?;
-    command.current_dir(&entry.path);
-    if let Some(path) = codex_home.as_ref() {
-        command.env("CODEX_HOME", path);
-    }
-    command.stdin(std::process::Stdio::piped());
-    command.stdout(std::process::Stdio::piped());
-    command.stderr(std::process::Stdio::piped());
-
-    let mut child = command.spawn().map_err(|e| e.to_string())?;
-    let stdin = child.stdin.take().ok_or("missing stdin")?;
-    let stdout = child.stdout.take().ok_or("missing stdout")?;
-    let stderr = child.stderr.take().ok_or("missing stderr")?;
-
+    // The transport owns the child process lifecycle, so the legacy
+    // `child` / `stdin` fields are intentionally `None` here.
     let session = Arc::new(WorkspaceSession {
         codex_args,
-        child: Mutex::new(child),
-        stdin: Mutex::new(stdin),
+        child: None,
+        stdin: None,
+        transport: Some(transport.clone()),
         pending: Mutex::new(HashMap::new()),
         request_context: Mutex::new(HashMap::new()),
         thread_workspace: Mutex::new(HashMap::new()),
@@ -796,9 +824,9 @@ pub(crate) async fn spawn_workspace_session<E: EventSink>(
     let session_clone = Arc::clone(&session);
     let fallback_workspace_id = entry.id.clone();
     let event_sink_clone = event_sink.clone();
+    let transport_for_reader = transport.clone();
     tokio::spawn(async move {
-        let mut lines = BufReader::new(stdout).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
+        while let Ok(Some(line)) = transport_for_reader.recv().await {
             if line.trim().is_empty() {
                 continue;
             }
@@ -1051,14 +1079,11 @@ pub(crate) async fn spawn_workspace_session<E: EventSink>(
         session_clone.request_context.lock().await.clear();
     });
 
+    // Forward stderr lines from the transport's stderr channel.
     let workspace_id = entry.id.clone();
     let event_sink_clone = event_sink.clone();
     tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if line.trim().is_empty() {
-                continue;
-            }
+        while let Some(line) = stderr_rx.recv().await {
             let payload = AppServerEvent {
                 workspace_id: workspace_id.clone(),
                 message: json!({
@@ -1070,7 +1095,7 @@ pub(crate) async fn spawn_workspace_session<E: EventSink>(
         }
     });
 
-    let init_params = build_initialize_params(&client_version);
+    let init_params = build_initialize_params(client_version);
     let init_result = timeout(
         Duration::from_secs(15),
         session.send_request("initialize", init_params),
@@ -1079,8 +1104,7 @@ pub(crate) async fn spawn_workspace_session<E: EventSink>(
     let init_response = match init_result {
         Ok(response) => response,
         Err(_) => {
-            let mut child = session.child.lock().await;
-            kill_child_process_tree(&mut child).await;
+            session.kill().await;
             return Err(
                 "Codex app-server did not respond to initialize. Check that `codex app-server` works in Terminal."
                     .to_string(),
@@ -1100,6 +1124,73 @@ pub(crate) async fn spawn_workspace_session<E: EventSink>(
     event_sink.emit_app_server_event(payload);
 
     Ok(session)
+}
+
+/// Spawn a workspace session using the transport factory.
+///
+/// Transport preference order:
+/// 1. `XIAOPANGXIE_CODEX_TRANSPORT` env var (`stdio` | `websocket` | `ws`).
+/// 2. The caller-supplied `transport_kind` (typically from `AppSettings`).
+/// 3. WebSocket default.
+///
+/// The factory transparently falls back to the other transport if the
+/// preferred one fails to start, surfacing a warning event so the UI can
+/// show the user.
+pub(crate) async fn spawn_workspace_session<E: EventSink>(
+    entry: WorkspaceEntry,
+    default_codex_bin: Option<String>,
+    codex_args: Option<String>,
+    codex_home: Option<PathBuf>,
+    client_version: String,
+    event_sink: E,
+    transport_kind: Option<CodexTransportKind>,
+) -> Result<Arc<WorkspaceSession>, String> {
+    let bundle = crate::codex_transport::create_transport(
+        default_codex_bin,
+        codex_args.as_deref(),
+        &entry.path,
+        codex_home.as_ref(),
+        transport_kind,
+    )
+    .await?;
+
+    // Notify frontend which transport was selected and if fallback occurred.
+    let transport_kind_str = bundle.kind.to_string();
+    let connected_payload = AppServerEvent {
+        workspace_id: entry.id.clone(),
+        message: json!({
+            "method": "codex/transportSelected",
+            "params": {
+                "transport": transport_kind_str,
+                "fallback": bundle.fallback_warning.is_some(),
+            }
+        }),
+    };
+    event_sink.emit_app_server_event(connected_payload);
+
+    if let Some(ref warning) = bundle.fallback_warning {
+        let warning_payload = AppServerEvent {
+            workspace_id: entry.id.clone(),
+            message: json!({
+                "method": "codex/transportFallback",
+                "params": {
+                    "warning": warning,
+                    "activeTransport": transport_kind_str,
+                }
+            }),
+        };
+        event_sink.emit_app_server_event(warning_payload);
+    }
+
+    setup_session_runtime(
+        bundle.transport,
+        bundle.stderr_rx,
+        &entry,
+        codex_args,
+        &client_version,
+        event_sink,
+    )
+    .await
 }
 
 #[cfg(test)]

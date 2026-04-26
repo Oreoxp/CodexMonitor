@@ -9,7 +9,6 @@ use tokio::sync::Mutex;
 use crate::backend::app_server::WorkspaceSession;
 use crate::codex::args::resolve_workspace_codex_args;
 use crate::codex::home::resolve_workspace_codex_home;
-use crate::shared::process_core::kill_child_process_tree;
 use crate::types::{AppSettings, WorkspaceEntry};
 
 use super::connect::workspace_session_spawn_lock;
@@ -116,8 +115,7 @@ where
             .register_workspace_with_path(workspace_id, path)
             .await;
     }
-    let mut child = current_session.child.lock().await;
-    kill_child_process_tree(&mut child).await;
+    current_session.kill().await;
 
     Ok(WorkspaceRuntimeCodexArgsResult {
         applied_codex_args: target_args,
@@ -169,8 +167,9 @@ mod tests {
 
         WorkspaceSession {
             codex_args,
-            child: Mutex::new(child),
-            stdin: Mutex::new(stdin),
+            child: Some(Mutex::new(child)),
+            stdin: Some(Mutex::new(stdin)),
+            transport: None,
             pending: Mutex::new(HashMap::new()),
             request_context: Mutex::new(HashMap::new()),
             thread_workspace: Mutex::new(HashMap::new()),

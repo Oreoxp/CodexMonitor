@@ -8,6 +8,7 @@ use tauri::WindowEvent;
 
 mod backend;
 mod codex;
+mod codex_transport;
 mod daemon_binary;
 mod dictation;
 mod event_sink;

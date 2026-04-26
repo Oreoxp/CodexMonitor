@@ -2,7 +2,7 @@ use serde_json::{json, Map, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 pub(crate) mod args;
 pub(crate) mod config;
@@ -11,6 +11,7 @@ pub(crate) mod home;
 use crate::backend::app_server::spawn_workspace_session as spawn_workspace_session_inner;
 pub(crate) use crate::backend::app_server::WorkspaceSession;
 use crate::backend::events::AppServerEvent;
+use crate::codex_transport::CodexTransportKind;
 use crate::event_sink::TauriEventSink;
 use crate::remote_backend;
 use crate::shared::agents_config_core;
@@ -31,6 +32,10 @@ fn emit_thread_live_event(app: &AppHandle, workspace_id: &str, method: &str, par
     );
 }
 
+/// Spawn a workspace session.
+///
+/// Transport selection (WebSocket vs stdio) and fallback are handled
+/// automatically by the transport factory inside `app_server.rs`.
 pub(crate) async fn spawn_workspace_session(
     entry: WorkspaceEntry,
     default_codex_bin: Option<String>,
@@ -39,6 +44,16 @@ pub(crate) async fn spawn_workspace_session(
     codex_home: Option<PathBuf>,
 ) -> Result<Arc<WorkspaceSession>, String> {
     let client_version = app_handle.package_info().version.to_string();
+
+    // Read the persisted transport preference from settings.  The env var
+    // `XIAOPANGXIE_CODEX_TRANSPORT` will still take precedence inside the
+    // factory; this only acts as the user-visible default.
+    let transport_kind: Option<CodexTransportKind> = {
+        let state = app_handle.state::<AppState>();
+        let settings = state.app_settings.lock().await;
+        Some((&settings.transport_mode).into())
+    };
+
     let event_sink = TauriEventSink::new(app_handle);
     spawn_workspace_session_inner(
         entry,
@@ -47,6 +62,7 @@ pub(crate) async fn spawn_workspace_session(
         codex_home,
         client_version,
         event_sink,
+        transport_kind,
     )
     .await
 }

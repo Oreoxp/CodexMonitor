@@ -1,6 +1,9 @@
 #[allow(dead_code)]
 #[path = "../backend/mod.rs"]
 mod backend;
+#[allow(dead_code)]
+#[path = "../codex_transport/mod.rs"]
+mod codex_transport;
 #[path = "../codex/args.rs"]
 mod codex_args;
 #[path = "../codex/config.rs"]
@@ -78,7 +81,6 @@ use tokio::sync::{broadcast, mpsc, Mutex, Semaphore};
 use backend::app_server::{spawn_workspace_session, WorkspaceSession};
 use backend::events::{AppServerEvent, EventSink, TerminalExit, TerminalOutput};
 use shared::codex_core::CodexLoginCancelState;
-use shared::process_core::kill_child_process_tree;
 use shared::prompts_core::{self, CustomPromptEntry};
 use shared::{
     agents_config_core, codex_aux_core, codex_core, files_core, git_core, git_ui_core,
@@ -104,6 +106,8 @@ fn spawn_with_client(
     codex_args: Option<String>,
     codex_home: Option<PathBuf>,
 ) -> impl std::future::Future<Output = Result<Arc<WorkspaceSession>, String>> {
+    // The daemon doesn't expose a settings UI, so it always relies on the
+    // factory's preference order (env var → default WebSocket).
     spawn_workspace_session(
         entry,
         default_bin,
@@ -111,6 +115,7 @@ fn spawn_with_client(
         codex_home,
         client_version,
         event_sink,
+        None,
     )
 }
 
@@ -232,8 +237,7 @@ impl DaemonState {
         };
 
         for (workspace_id, session) in stale_sessions {
-            let mut child = session.child.lock().await;
-            kill_child_process_tree(&mut child).await;
+            session.kill().await;
             eprintln!("daemon: pruned stale session for removed workspace {workspace_id}");
         }
     }
@@ -1567,7 +1571,6 @@ fn parse_args() -> Result<DaemonConfig, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::process_core::kill_child_process_tree;
     use crate::storage::write_workspaces;
     use crate::types::WorkspaceKind;
     use serde_json::json;
@@ -1670,8 +1673,9 @@ mod tests {
 
         Arc::new(WorkspaceSession {
             codex_args: None,
-            child: Mutex::new(child),
-            stdin: Mutex::new(stdin),
+            child: Some(Mutex::new(child)),
+            stdin: Some(Mutex::new(stdin)),
+            transport: None,
             pending: Mutex::new(HashMap::new()),
             request_context: Mutex::new(HashMap::new()),
             thread_workspace: Mutex::new(HashMap::new()),
@@ -1869,8 +1873,12 @@ mod tests {
 
             let stale_session_exited = tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
-                    let exited = stale_session
+                    // Test fixtures populate `child`, so this `expect` is fine here.
+                    let child_mutex = stale_session
                         .child
+                        .as_ref()
+                        .expect("test fixture session has child");
+                    let exited = child_mutex
                         .lock()
                         .await
                         .try_wait()
@@ -1889,20 +1897,11 @@ mod tests {
             );
 
             if let Some(keep_session) = state.sessions.lock().await.remove("ws-keep") {
-                let mut child = keep_session.child.lock().await;
-                kill_child_process_tree(&mut child).await;
+                keep_session.kill().await;
             }
 
-            if stale_session
-                .child
-                .lock()
-                .await
-                .try_wait()
-                .expect("query stale session child")
-                .is_none()
-            {
-                let mut child = stale_session.child.lock().await;
-                kill_child_process_tree(&mut child).await;
+            if stale_session.is_alive().await {
+                stale_session.kill().await;
             }
 
             let _ = std::fs::remove_dir_all(&tmp);
