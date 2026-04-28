@@ -576,7 +576,7 @@ describe("tauri invoke wrappers", () => {
   it("reads agents settings", async () => {
     const invokeMock = vi.mocked(invoke);
     invokeMock.mockResolvedValueOnce({
-      configPath: "/Users/me/.codex/config.toml",
+      configPath: "/Users/me/.opencrab/config.toml",
       multiAgentEnabled: true,
       maxThreads: 6,
       maxDepth: 1,
@@ -591,7 +591,7 @@ describe("tauri invoke wrappers", () => {
   it("updates core agents settings", async () => {
     const invokeMock = vi.mocked(invoke);
     invokeMock.mockResolvedValueOnce({
-      configPath: "/Users/me/.codex/config.toml",
+      configPath: "/Users/me/.opencrab/config.toml",
       multiAgentEnabled: false,
       maxThreads: 4,
       maxDepth: 3,

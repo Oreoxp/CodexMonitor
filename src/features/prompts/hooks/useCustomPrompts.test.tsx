@@ -41,7 +41,7 @@ describe("useCustomPrompts", () => {
   });
 
   it("requests the global prompts dir when a workspace is selected", async () => {
-    getGlobalPromptsDirMock.mockResolvedValue("/tmp/.codex/prompts");
+    getGlobalPromptsDirMock.mockResolvedValue("/tmp/.opencrab/prompts");
     const { result } = renderHook(() =>
       useCustomPrompts({ activeWorkspace: workspace }),
     );
@@ -52,6 +52,6 @@ describe("useCustomPrompts", () => {
     });
 
     expect(getGlobalPromptsDirMock).toHaveBeenCalledWith("ws-1");
-    expect(path).toBe("/tmp/.codex/prompts");
+    expect(path).toBe("/tmp/.opencrab/prompts");
   });
 });

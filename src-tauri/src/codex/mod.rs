@@ -7,6 +7,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 pub(crate) mod args;
 pub(crate) mod config;
 pub(crate) mod home;
+pub(crate) mod model_provider;
 
 use crate::backend::app_server::spawn_workspace_session as spawn_workspace_session_inner;
 pub(crate) use crate::backend::app_server::WorkspaceSession;
@@ -900,6 +901,32 @@ pub(crate) async fn get_config_model(
     }
 
     codex_core::get_config_model_core(&state.workspaces, workspace_id).await
+}
+
+/// Read the structured model + provider settings from `~/.opencrab/config.toml`.
+#[tauri::command]
+pub(crate) fn get_model_provider_settings()
+    -> Result<model_provider::ModelProviderSettings, String>
+{
+    model_provider::read_settings()
+}
+
+/// Write/merge the model + provider settings into `~/.opencrab/config.toml`.
+#[tauri::command]
+pub(crate) fn update_model_provider_settings(
+    settings: model_provider::ModelProviderSettings,
+) -> Result<model_provider::ModelProviderSettings, String> {
+    model_provider::write_settings(&settings)?;
+    model_provider::read_settings()
+}
+
+/// Fetch the list of available models from a custom OpenAI-compatible base URL.
+#[tauri::command]
+pub(crate) async fn fetch_models_from_base_url(
+    base_url: String,
+    api_key: Option<String>,
+) -> Result<model_provider::FetchModelsResponse, String> {
+    model_provider::fetch_models(&base_url, api_key).await
 }
 
 /// Generates a commit message in the background without showing in the main chat

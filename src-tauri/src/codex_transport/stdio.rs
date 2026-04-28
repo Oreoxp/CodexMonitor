@@ -43,7 +43,9 @@ impl StdioTransport {
     /// * `codex_bin` — Optional path to the `codex` binary.
     /// * `codex_args` — Optional extra CLI arguments.
     /// * `cwd` — Working directory for the child process.
-    /// * `codex_home` — Optional `CODEX_HOME` environment variable override.
+    /// * `codex_home` — Optional `OPENCRAB_HOME` environment variable override
+    ///   passed to the child process so that the backend uses the same home
+    ///   directory (defaults to `~/.opencrab`).
     ///
     /// # Returns
     /// A tuple of `(StdioTransport, StderrReceiver)`. The stderr receiver
@@ -68,7 +70,8 @@ impl StdioTransport {
 
         command.current_dir(cwd);
         if let Some(path) = codex_home {
-            command.env("CODEX_HOME", path);
+            // 与上游 codex 的 branding 常量保持一致:OPENCRAB_HOME 是新的 home 环境变量。
+            command.env("OPENCRAB_HOME", path);
         }
         command.stdin(std::process::Stdio::piped());
         command.stdout(std::process::Stdio::piped());

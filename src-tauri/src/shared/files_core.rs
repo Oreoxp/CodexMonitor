@@ -11,7 +11,7 @@ use crate::types::WorkspaceEntry;
 
 fn resolve_default_codex_home() -> Result<PathBuf, String> {
     codex_home::resolve_default_codex_home()
-        .ok_or_else(|| "Unable to resolve CODEX_HOME".to_string())
+        .ok_or_else(|| "Unable to resolve OPENCRAB_HOME".to_string())
 }
 
 async fn resolve_workspace_root(

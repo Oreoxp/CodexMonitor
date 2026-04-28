@@ -60,7 +60,7 @@ getConfigModelMock.mockResolvedValue(null);
 isMobileRuntimeMock.mockResolvedValue(false);
 listWorkspacesMock.mockResolvedValue([]);
 getAgentsSettingsMock.mockResolvedValue({
-  configPath: "/Users/me/.codex/config.toml",
+  configPath: "/Users/me/.opencrab/config.toml",
   multiAgentEnabled: false,
   maxThreads: 6,
   maxDepth: 1,

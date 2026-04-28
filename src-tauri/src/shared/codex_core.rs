@@ -234,7 +234,7 @@ async fn resolve_codex_home_for_workspace_core(
     let (entry, parent_entry) = resolve_workspace_and_parent(workspaces, workspace_id).await?;
     resolve_workspace_codex_home(&entry, parent_entry.as_ref())
         .or_else(resolve_default_codex_home)
-        .ok_or_else(|| "Unable to resolve CODEX_HOME".to_string())
+        .ok_or_else(|| "Unable to resolve OPENCRAB_HOME".to_string())
 }
 
 async fn resolve_workspace_path_core(

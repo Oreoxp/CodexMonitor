@@ -13,6 +13,7 @@ import {
   SettingsToggleRow,
 } from "@/features/design-system/components/settings/SettingsPrimitives";
 import { FileEditorCard } from "@/features/shared/components/FileEditorCard";
+import { useModelProviderSettings } from "@settings/hooks/useModelProviderSettings";
 
 type SettingsCodexSectionProps = {
   appSettings: AppSettings;
@@ -188,6 +189,8 @@ export function SettingsCodexSection({
 
   const didNormalizeDefaultsRef = useRef(false);
   const { t } = useTranslation();
+
+  const providerSettings = useModelProviderSettings();
   useEffect(() => {
     if (didNormalizeDefaultsRef.current) {
       return;
@@ -393,6 +396,221 @@ export function SettingsCodexSection({
 
       <div className="settings-divider" />
       <div className="settings-field-label settings-field-label--section">
+        {t("settings.codex.provider.sectionTitle")}
+      </div>
+      <div className="settings-help">
+        {t("settings.codex.provider.sectionSubtitle")}
+      </div>
+      {providerSettings.loadError && (
+        <div className="settings-agents-error">
+          {t("settings.codex.provider.loadError")}: {providerSettings.loadError}
+        </div>
+      )}
+
+      <div className="settings-field">
+        <label className="settings-field-label" htmlFor="provider-key">
+          {t("settings.codex.provider.providerKeyLabel")}
+        </label>
+        <input
+          id="provider-key"
+          className="settings-input"
+          value={providerSettings.draft.providerKey ?? ""}
+          placeholder="opencrab"
+          disabled={providerSettings.isLoading}
+          onChange={(event) =>
+            providerSettings.setField("providerKey", event.target.value)
+          }
+        />
+        <div className="settings-help">
+          {t("settings.codex.provider.providerKeyHelp")}
+        </div>
+
+        <label className="settings-field-label" htmlFor="provider-name">
+          {t("settings.codex.provider.providerNameLabel")}
+        </label>
+        <input
+          id="provider-name"
+          className="settings-input"
+          value={providerSettings.draft.providerName ?? ""}
+          placeholder={t("settings.codex.provider.providerNamePlaceholder")}
+          disabled={providerSettings.isLoading}
+          onChange={(event) =>
+            providerSettings.setField("providerName", event.target.value)
+          }
+        />
+
+        <label className="settings-field-label" htmlFor="provider-base-url">
+          {t("settings.codex.provider.baseUrlLabel")}
+        </label>
+        <div className="settings-field-row">
+          <input
+            id="provider-base-url"
+            className="settings-input"
+            value={providerSettings.draft.baseUrl ?? ""}
+            placeholder={t("settings.codex.provider.baseUrlPlaceholder")}
+            disabled={providerSettings.isLoading}
+            onChange={(event) =>
+              providerSettings.setField("baseUrl", event.target.value)
+            }
+          />
+          <button
+            type="button"
+            className="ghost"
+            disabled={
+              providerSettings.isFetchingModels ||
+              !((providerSettings.draft.baseUrl ?? "").trim())
+            }
+            onClick={() => {
+              void providerSettings.fetchModels();
+            }}
+          >
+            {providerSettings.isFetchingModels
+              ? t("settings.codex.provider.refreshing")
+              : t("settings.codex.provider.refreshFromBaseUrl")}
+          </button>
+        </div>
+        <div className="settings-help">
+          {t("settings.codex.provider.baseUrlHelp", {
+            endpoint:
+              providerSettings.fetchedEndpoint ??
+              `${(providerSettings.draft.baseUrl ?? "").replace(/\/+$/, "") || "BASE_URL"}/models`,
+          })}
+        </div>
+        {providerSettings.fetchError && (
+          <div className="settings-agents-error">
+            {t("settings.codex.provider.refreshError")}: {providerSettings.fetchError}
+          </div>
+        )}
+        {providerSettings.fetchSuccessMessage && !providerSettings.fetchError && (
+          <div className="settings-help">
+            {t("settings.codex.provider.refreshSuccess", {
+              count: providerSettings.fetchedModels.length,
+              endpoint: providerSettings.fetchSuccessMessage,
+            })}
+          </div>
+        )}
+
+        <label className="settings-field-label" htmlFor="provider-model">
+          {t("settings.codex.provider.modelLabel")}
+        </label>
+        <div className="settings-field-row">
+          <input
+            id="provider-model"
+            className="settings-input"
+            value={providerSettings.draft.model ?? ""}
+            placeholder={t("settings.codex.provider.modelPlaceholder")}
+            disabled={providerSettings.isLoading}
+            onChange={(event) =>
+              providerSettings.setField("model", event.target.value)
+            }
+            list="provider-model-options"
+          />
+          {providerSettings.fetchedModels.length > 0 && (
+            <select
+              className="settings-select"
+              value=""
+              aria-label={t("settings.codex.provider.modelLabel")}
+              onChange={(event) => {
+                if (event.target.value) {
+                  providerSettings.setField("model", event.target.value);
+                }
+              }}
+            >
+              <option value="" disabled>
+                {`▾ ${providerSettings.fetchedModels.length}`}
+              </option>
+              {providerSettings.fetchedModels.map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.id}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+        {providerSettings.fetchedModels.length > 0 && (
+          <datalist id="provider-model-options">
+            {providerSettings.fetchedModels.map((model) => (
+              <option key={model.id} value={model.id} />
+            ))}
+          </datalist>
+        )}
+        <div className="settings-help">
+          {t("settings.codex.provider.modelHelp")}
+        </div>
+
+        <label className="settings-field-label" htmlFor="provider-api-key">
+          {t("settings.codex.provider.apiKeyLabel")}
+        </label>
+        <input
+          id="provider-api-key"
+          className="settings-input"
+          type="password"
+          autoComplete="off"
+          spellCheck={false}
+          value={providerSettings.draft.apiKey ?? ""}
+          placeholder={t("settings.codex.provider.apiKeyPlaceholder")}
+          disabled={providerSettings.isLoading}
+          onChange={(event) =>
+            providerSettings.setField("apiKey", event.target.value)
+          }
+        />
+        <div className="settings-help">
+          {t("settings.codex.provider.apiKeyHelp")}
+        </div>
+
+        <label className="settings-field-label" htmlFor="provider-wire-api">
+          {t("settings.codex.provider.wireApiLabel")}
+        </label>
+        <select
+          id="provider-wire-api"
+          className="settings-select"
+          value={providerSettings.draft.wireApi ?? "chat"}
+          disabled={providerSettings.isLoading}
+          onChange={(event) =>
+            providerSettings.setField("wireApi", event.target.value)
+          }
+        >
+          <option value="chat">
+            {t("settings.codex.provider.wireApiChat")}
+          </option>
+          <option value="responses">
+            {t("settings.codex.provider.wireApiResponses")}
+          </option>
+        </select>
+
+        <div className="settings-field-actions">
+          <button
+            type="button"
+            className="primary"
+            disabled={
+              providerSettings.isSaving ||
+              providerSettings.isLoading ||
+              !providerSettings.isDirty
+            }
+            onClick={() => {
+              void providerSettings.save();
+            }}
+          >
+            {providerSettings.isSaving
+              ? t("settings.codex.provider.saving")
+              : t("settings.codex.provider.save")}
+          </button>
+        </div>
+        {providerSettings.saveError && (
+          <div className="settings-agents-error">
+            {providerSettings.saveError}
+          </div>
+        )}
+        {providerSettings.saved.configPath && (
+          <div className="settings-help">
+            {t("settings.codex.storedAt")}{" "}
+            <code>{providerSettings.saved.configPath}</code>
+          </div>
+        )}
+      </div>
+
+      <div className="settings-divider" />
+      <div className="settings-field-label settings-field-label--section">
         {t("settings.codex.defaultParameters")}
       </div>
 
@@ -539,7 +757,7 @@ export function SettingsCodexSection({
         onSave={onSaveGlobalAgents}
         helpText={
           <>
-            {t("settings.codex.storedAt")} <code>~/.codex/AGENTS.md</code>.
+            {t("settings.codex.storedAt")} <code>~/.opencrab/AGENTS.md</code>.
           </>
         }
         classNames={{
@@ -570,7 +788,7 @@ export function SettingsCodexSection({
         onSave={onSaveGlobalConfig}
         helpText={
           <>
-            {t("settings.codex.storedAt")} <code>~/.codex/config.toml</code>.
+            {t("settings.codex.storedAt")} <code>~/.opencrab/config.toml</code>.
           </>
         }
         classNames={{

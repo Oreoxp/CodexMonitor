@@ -734,6 +734,55 @@ export async function getModelList(workspaceId: string) {
   return invoke<any>("model_list", { workspaceId });
 }
 
+/**
+ * 结构化读取 ~/.opencrab/config.toml 中的 model + provider 设置。
+ * 与 codex `[model_providers.<provider>]` 块的字段一一对应。
+ */
+export type ModelProviderSettings = {
+  model: string | null;
+  providerKey: string | null;
+  providerName: string | null;
+  baseUrl: string | null;
+  /**
+   * 直接存储的 API Key (映射到 codex `[model_providers.<key>].experimental_bearer_token`)。
+   * 用户不需要再去设置环境变量。
+   */
+  apiKey: string | null;
+  wireApi: string | null;
+  configPath: string | null;
+};
+
+export type FetchedModel = {
+  id: string;
+  object?: string | null;
+  ownedBy?: string | null;
+};
+
+export type FetchModelsResponse = {
+  models: FetchedModel[];
+  endpoint: string;
+};
+
+export async function getModelProviderSettings(): Promise<ModelProviderSettings> {
+  return invoke<ModelProviderSettings>("get_model_provider_settings");
+}
+
+export async function updateModelProviderSettings(
+  settings: ModelProviderSettings,
+): Promise<ModelProviderSettings> {
+  return invoke<ModelProviderSettings>("update_model_provider_settings", { settings });
+}
+
+export async function fetchModelsFromBaseUrl(
+  baseUrl: string,
+  apiKey?: string | null,
+): Promise<FetchModelsResponse> {
+  return invoke<FetchModelsResponse>("fetch_models_from_base_url", {
+    baseUrl,
+    apiKey: apiKey ?? null,
+  });
+}
+
 export async function getExperimentalFeatureList(
   workspaceId: string,
   cursor?: string | null,

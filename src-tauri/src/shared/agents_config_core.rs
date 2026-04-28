@@ -86,7 +86,7 @@ pub(crate) fn get_agents_settings_core() -> Result<AgentsSettingsDto, String> {
     let config_path = codex_home.join("config.toml");
     let config_path_string = config_path
         .to_str()
-        .ok_or_else(|| "Unable to resolve CODEX_HOME".to_string())?
+        .ok_or_else(|| "Unable to resolve OPENCRAB_HOME".to_string())?
         .to_string();
 
     let (_, document) = config_toml_core::load_global_config_document(&codex_home)?;
@@ -381,7 +381,7 @@ pub(crate) fn write_agent_config_toml_core(agent_name: &str, content: &str) -> R
 
 fn resolve_codex_home() -> Result<PathBuf, String> {
     codex_home::resolve_default_codex_home()
-        .ok_or_else(|| "Unable to resolve CODEX_HOME".to_string())
+        .ok_or_else(|| "Unable to resolve OPENCRAB_HOME".to_string())
 }
 
 fn read_multi_agent_enabled(document: &Document) -> bool {

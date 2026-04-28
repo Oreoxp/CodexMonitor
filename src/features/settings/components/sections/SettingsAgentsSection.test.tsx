@@ -6,7 +6,7 @@ import { SettingsAgentsSection } from "./SettingsAgentsSection";
 
 const baseProps = (): SettingsAgentsSectionProps => ({
   settings: {
-    configPath: "/Users/me/.codex/config.toml",
+    configPath: "/Users/me/.opencrab/config.toml",
     multiAgentEnabled: false,
     maxThreads: 6,
     maxDepth: 1,
@@ -16,7 +16,7 @@ const baseProps = (): SettingsAgentsSectionProps => ({
         description: "Research-focused role",
         developerInstructions: "Investigate and propose safe changes.",
         configFile: "researcher.toml",
-        resolvedPath: "/Users/me/.codex/agents/researcher.toml",
+        resolvedPath: "/Users/me/.opencrab/agents/researcher.toml",
         managedByApp: true,
         fileExists: true,
       },
