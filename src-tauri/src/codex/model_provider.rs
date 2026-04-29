@@ -16,7 +16,7 @@
 //! name = "..."
 //! base_url = "..."
 //! experimental_bearer_token = "<api key>"
-//! wire_api = "chat" | "responses"
+//! wire_api = "responses"
 //! ```
 //!
 //! `experimental_bearer_token` is codex's native field for "stash the API key
@@ -36,8 +36,17 @@ use crate::shared::config_toml_core;
 
 /// Default provider key used when the user has not chosen one yet.
 const DEFAULT_PROVIDER_KEY: &str = "opencrab";
+/// Default friendly display name written when the user leaves the field
+/// blank. codex rejects an empty `name` (see `validate_model_providers`).
+const DEFAULT_PROVIDER_NAME: &str = "OpenCrab Provider";
 /// Default wire API to use for new providers.
-const DEFAULT_WIRE_API: &str = "chat";
+///
+/// codex 已经移除了 `chat`,反序列化时只接受 `"responses"`
+/// (见 `codex-rs/model-provider-info/src/lib.rs::WireApi`)。
+const DEFAULT_WIRE_API: &str = "responses";
+/// Wire API that codex still recognizes. 历史 config.toml 中可能残留
+/// `wire_api = "chat"`,我们读时把它归一化为 responses 避免后端起不来。
+const SUPPORTED_WIRE_APIS: &[&str] = &["responses"];
 
 /// Snapshot of the model + provider settings exposed to the UI.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -67,7 +76,7 @@ pub(crate) fn read_settings() -> Result<ModelProviderSettings, String> {
     let Some(root) = resolve_default_codex_home() else {
         return Err("Unable to resolve OPENCRAB_HOME".to_string());
     };
-    let (_, document) = config_toml_core::load_global_config_document(&root)?;
+    let (_, mut document) = config_toml_core::load_global_config_document(&root)?;
 
     let model = config_toml_core::read_top_level_string(&document, "model");
     let provider_key = config_toml_core::read_top_level_string(&document, "model_provider");
@@ -99,18 +108,73 @@ pub(crate) fn read_settings() -> Result<ModelProviderSettings, String> {
         .and_then(Item::as_str)
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    let wire_api = provider_table
+    let raw_wire_api = provider_table
         .and_then(|t| t.get("wire_api"))
         .and_then(Item::as_str)
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    // Auto-migrate any legacy `chat` value (codex rejects it now) and any
+    // unknown variant to the supported `responses` so the UI surfaces a value
+    // that actually parses.
+    let needs_wire_api_migration = matches!(
+        raw_wire_api.as_deref(),
+        Some(v) if !SUPPORTED_WIRE_APIS.iter().any(|expected| *expected == v),
+    );
+    let wire_api = match raw_wire_api {
+        Some(value) if SUPPORTED_WIRE_APIS.iter().any(|v| *v == value) => Some(value),
+        Some(_) => Some(DEFAULT_WIRE_API.to_string()),
+        None => None,
+    };
+
+    // If the existing config.toml has fields that codex would reject at
+    // parse / validation time (e.g. `wire_api = "chat"`, `name = ""`),
+    // silently rewrite them so the next codex spawn succeeds without
+    // requiring the user to know they have to click Save.
+    let provider_block_exists = provider_table.is_some();
+    let needs_name_migration = provider_block_exists && provider_name.is_none();
+    if provider_block_exists && (needs_wire_api_migration || needs_name_migration) {
+        if let Some(providers_table) =
+            document.get_mut("model_providers").and_then(Item::as_table_mut)
+        {
+            if needs_wire_api_migration {
+                set_or_remove_subtable_string(
+                    providers_table,
+                    &lookup_key,
+                    "wire_api",
+                    Some(DEFAULT_WIRE_API),
+                );
+            }
+            if needs_name_migration {
+                set_or_remove_subtable_string(
+                    providers_table,
+                    &lookup_key,
+                    "name",
+                    Some(DEFAULT_PROVIDER_NAME),
+                );
+            }
+        }
+        if let Err(err) = config_toml_core::persist_global_config_document(&root, &document) {
+            // Don't fail the read if the migration write fails — surface the
+            // logical settings so the UI can still render and the user can
+            // manually save.
+            eprintln!("opencrab: failed to auto-migrate config.toml: {err}");
+        }
+    }
 
     let config_path = root.join("config.toml").to_string_lossy().to_string();
+
+    // Reflect the on-disk migration in the in-memory snapshot so the UI shows
+    // the value we just persisted.
+    let effective_name = if needs_name_migration {
+        Some(DEFAULT_PROVIDER_NAME.to_string())
+    } else {
+        provider_name
+    };
 
     Ok(ModelProviderSettings {
         model,
         provider_key,
-        provider_name,
+        provider_name: effective_name,
         base_url,
         api_key,
         wire_api,
@@ -145,7 +209,22 @@ pub(crate) fn write_settings(settings: &ModelProviderSettings) -> Result<(), Str
     );
 
     let providers_table = config_toml_core::ensure_table(&mut document, "model_providers")?;
-    set_or_remove_subtable_string(providers_table, &provider_key, "name", settings.provider_name.as_deref());
+
+    // codex's `validate_model_providers` rejects an empty `name`; fall back
+    // to a sensible default so saving with the field blank is still valid.
+    let provider_name = settings
+        .provider_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| DEFAULT_PROVIDER_NAME.to_string());
+    set_or_remove_subtable_string(
+        providers_table,
+        &provider_key,
+        "name",
+        Some(provider_name.as_str()),
+    );
     set_or_remove_subtable_string(providers_table, &provider_key, "base_url", settings.base_url.as_deref());
     // Direct API key — codex's `experimental_bearer_token` field lets us
     // store the secret in config.toml instead of going through env vars.
@@ -159,14 +238,20 @@ pub(crate) fn write_settings(settings: &ModelProviderSettings) -> Result<(), Str
     // no longer manages it.
     set_or_remove_subtable_string(providers_table, &provider_key, "env_key", None);
 
-    // Default wire_api to "chat" if not provided. The UI lets users pick
-    // either "chat" or "responses".
-    let wire_api = settings
+    // codex 当前只接受 `responses`;若用户/历史配置传入 `chat` 或其他
+    // 未知值,我们直接归一化到 responses,避免写出来的 config.toml 让
+    // codex 在反序列化阶段就报错从而让 thread/start 失败。
+    let raw_wire = settings
         .wire_api
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or(DEFAULT_WIRE_API);
+    let wire_api = if SUPPORTED_WIRE_APIS.iter().any(|v| *v == raw_wire) {
+        raw_wire
+    } else {
+        DEFAULT_WIRE_API
+    };
     set_or_remove_subtable_string(providers_table, &provider_key, "wire_api", Some(wire_api));
 
     config_toml_core::persist_global_config_document(&root, &document)
@@ -400,5 +485,18 @@ mod tests {
         let parsed = parse_models_payload(&body);
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].id, "local-7b");
+    }
+
+    #[test]
+    fn supported_wire_apis_only_responses() {
+        assert!(SUPPORTED_WIRE_APIS.iter().any(|v| *v == "responses"));
+        assert!(!SUPPORTED_WIRE_APIS.iter().any(|v| *v == "chat"));
+        assert_eq!(DEFAULT_WIRE_API, "responses");
+    }
+
+    #[test]
+    fn default_provider_name_is_non_empty() {
+        // codex's `validate_model_providers` rejects an empty `name`.
+        assert!(!DEFAULT_PROVIDER_NAME.trim().is_empty());
     }
 }

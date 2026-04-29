@@ -18,7 +18,8 @@ const EMPTY_DRAFT: ModelProviderSettings = {
 };
 
 const DEFAULT_PROVIDER_KEY = "opencrab";
-const DEFAULT_WIRE_API = "chat";
+// codex 已经移除 `chat` wire_api,只支持 `responses`。
+const DEFAULT_WIRE_API = "responses";
 
 const trimmed = (value: string | null | undefined): string | null => {
   if (value == null) {

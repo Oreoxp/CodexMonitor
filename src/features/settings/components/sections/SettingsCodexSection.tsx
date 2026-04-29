@@ -564,19 +564,20 @@ export function SettingsCodexSection({
         <select
           id="provider-wire-api"
           className="settings-select"
-          value={providerSettings.draft.wireApi ?? "chat"}
-          disabled={providerSettings.isLoading}
-          onChange={(event) =>
-            providerSettings.setField("wireApi", event.target.value)
+          value="responses"
+          disabled
+          aria-readonly="true"
+          onChange={() =>
+            providerSettings.setField("wireApi", "responses")
           }
         >
-          <option value="chat">
-            {t("settings.codex.provider.wireApiChat")}
-          </option>
           <option value="responses">
             {t("settings.codex.provider.wireApiResponses")}
           </option>
         </select>
+        <div className="settings-help">
+          {t("settings.codex.provider.wireApiHelp")}
+        </div>
 
         <div className="settings-field-actions">
           <button

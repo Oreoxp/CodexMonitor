@@ -58,11 +58,21 @@ impl CodexRpcClient {
     ///
     /// The client is inert until [`start`] is called.
     pub(crate) fn new(transport: Box<dyn CodexTransport>) -> Self {
+        Self::new_from_arc(Arc::from(transport))
+    }
+
+    /// Create a new RPC client from an already-shared transport `Arc`.
+    ///
+    /// Useful when the caller wants to keep its own handle to the transport
+    /// (for example, the V1 `CodexSessionManager` shares the transport with
+    /// `WorkspaceSession`'s legacy reader loop while still exposing an
+    /// `Arc<CodexRpcClient>` on `CodexSession`).
+    pub(crate) fn new_from_arc(transport: Arc<dyn CodexTransport>) -> Self {
         let (notification_tx, _) = broadcast::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         Self {
-            transport: Arc::from(transport),
+            transport,
             next_id: AtomicU64::new(1),
             pending: Arc::new(Mutex::new(HashMap::new())),
             notification_tx,
@@ -74,6 +84,12 @@ impl CodexRpcClient {
     /// Returns the transport kind for this client.
     pub(crate) fn transport_kind(&self) -> CodexTransportKind {
         self.transport.kind()
+    }
+
+    /// Check whether the underlying transport is still alive.
+    #[allow(dead_code)]
+    pub(crate) async fn transport_is_alive(&self) -> bool {
+        self.transport.is_alive().await
     }
 
     /// Subscribe to server-initiated notifications.
@@ -172,6 +188,20 @@ impl CodexRpcClient {
                 )))
             }
         }
+    }
+
+    /// Send a raw JSON-RPC **response** (`id` + `result`) for a server-initiated
+    /// request the client received earlier. Fire-and-forget — does not wait for
+    /// any acknowledgement.
+    #[allow(dead_code)]
+    pub(crate) async fn send_response(
+        &self,
+        id: Value,
+        result: Value,
+    ) -> Result<(), TransportError> {
+        let message = json!({ "id": id, "result": result });
+        let line = serde_json::to_string(&message).map_err(|e| TransportError::io(e.to_string()))?;
+        self.transport.send(&line).await
     }
 
     /// Send a JSON-RPC **notification** (fire-and-forget, no `id`).

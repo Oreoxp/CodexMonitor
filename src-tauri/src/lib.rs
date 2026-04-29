@@ -8,6 +8,7 @@ use tauri::WindowEvent;
 
 mod backend;
 mod codex;
+mod codex_session;
 mod codex_transport;
 mod daemon_binary;
 mod dictation;
@@ -58,6 +59,14 @@ fn keep_daemon_running_after_close(app_handle: &tauri::AppHandle) -> bool {
 
 #[cfg(desktop)]
 async fn stop_managed_daemons_for_exit(app_handle: tauri::AppHandle) {
+    // V1: tear down all live Codex sessions before stopping the daemon so
+    // no `codex app-server` child process is left behind.  This emits a
+    // `Stopped` `codex/sessionStatus` for each tracked session.
+    {
+        let state = app_handle.state::<state::AppState>();
+        let session_manager = state.session_manager.clone();
+        session_manager.shutdown_all().await;
+    }
     let state = app_handle.state::<state::AppState>();
     let _ = tailscale::tailscale_daemon_stop(state).await;
 }
@@ -117,6 +126,14 @@ pub fn run() {
         .setup(|app| {
             let state = state::AppState::load(&app.handle());
             app.manage(state);
+            // Silently fix any historical config.toml that codex would
+            // refuse to parse (e.g. legacy `wire_api = "chat"`,
+            // `name = ""`). This keeps "Failed to start a local thread."
+            // from happening to users who saved provider settings against
+            // the previous defaults.
+            if let Err(err) = codex::model_provider::read_settings() {
+                eprintln!("opencrab: provider settings auto-migration skipped: {err}");
+            }
             #[cfg(target_os = "macos")]
             {
                 let tray_state = app.state::<tray::TrayState>();

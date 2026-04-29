@@ -12,7 +12,7 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::timeout;
 
-use crate::backend::events::{AppServerEvent, EventSink};
+use crate::backend::events::{AppServerEvent, EventSink, ReaderExitNotifier};
 use crate::codex::args::parse_codex_args;
 use crate::codex_transport::{CodexTransport, CodexTransportKind};
 use crate::shared::process_core::{kill_child_process_tree, tokio_command};
@@ -799,6 +799,7 @@ async fn setup_session_runtime<E: EventSink>(
     codex_args: Option<String>,
     client_version: &str,
     event_sink: E,
+    exit_notifier: Option<Arc<dyn ReaderExitNotifier>>,
 ) -> Result<Arc<WorkspaceSession>, String> {
     // The transport owns the child process lifecycle, so the legacy
     // `child` / `stdin` fields are intentionally `None` here.
@@ -825,8 +826,19 @@ async fn setup_session_runtime<E: EventSink>(
     let fallback_workspace_id = entry.id.clone();
     let event_sink_clone = event_sink.clone();
     let transport_for_reader = transport.clone();
+    let exit_notifier_for_reader = exit_notifier.clone();
+    let workspace_id_for_exit = entry.id.clone();
     tokio::spawn(async move {
-        while let Ok(Some(line)) = transport_for_reader.recv().await {
+        let mut reader_error: Option<String> = None;
+        loop {
+            let line = match transport_for_reader.recv().await {
+                Ok(Some(line)) => line,
+                Ok(None) => break,
+                Err(err) => {
+                    reader_error = Some(err.to_string());
+                    break;
+                }
+            };
             if line.trim().is_empty() {
                 continue;
             }
@@ -1077,6 +1089,14 @@ async fn setup_session_runtime<E: EventSink>(
         // Ensure pending foreground requests cannot accumulate after process output ends.
         session_clone.pending.lock().await.clear();
         session_clone.request_context.lock().await.clear();
+
+        // V1: notify the CodexSessionManager (if any) so it can flip the
+        // session status to `Disconnected` (clean EOF) or `Crashed`
+        // (transport-level error captured above).  The notifier is `None`
+        // for legacy callers (e.g. the daemon binary) and tests.
+        if let Some(notifier) = exit_notifier_for_reader {
+            notifier.notify_exit(workspace_id_for_exit, reader_error);
+        }
     });
 
     // Forward stderr lines from the transport's stderr channel.
@@ -1189,6 +1209,40 @@ pub(crate) async fn spawn_workspace_session<E: EventSink>(
         codex_args,
         &client_version,
         event_sink,
+        None,
+    )
+    .await
+}
+
+/// Manager-aware spawn entrypoint used by `CodexSessionManager::connect`.
+///
+/// The manager has already created the transport and emitted the `Starting`
+/// and `Connected` status events; this function only handles the `setup`
+/// phase (build `WorkspaceSession`, run reader loop + initialize handshake)
+/// and reports reader exits back through `exit_notifier`.
+///
+/// `_codex_session` is accepted as a parameter so future iterations can wire
+/// it into the router (e.g. to expose `rpc.send_response` / `rpc.notify`).
+/// V1 keeps the legacy `WorkspaceSession` send path, so it is currently
+/// unused at this layer.
+pub(crate) async fn spawn_workspace_session_with_manager_inner<E: EventSink>(
+    entry: WorkspaceEntry,
+    transport: Arc<dyn CodexTransport>,
+    stderr_rx: mpsc::UnboundedReceiver<String>,
+    codex_args: Option<String>,
+    client_version: String,
+    event_sink: E,
+    _codex_session: Arc<crate::codex_session::CodexSession>,
+    exit_notifier: Arc<dyn ReaderExitNotifier>,
+) -> Result<Arc<WorkspaceSession>, String> {
+    setup_session_runtime(
+        transport,
+        stderr_rx,
+        &entry,
+        codex_args,
+        &client_version,
+        event_sink,
+        Some(exit_notifier),
     )
     .await
 }

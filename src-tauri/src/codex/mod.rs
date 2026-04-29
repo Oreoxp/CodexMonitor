@@ -9,11 +9,9 @@ pub(crate) mod config;
 pub(crate) mod home;
 pub(crate) mod model_provider;
 
-use crate::backend::app_server::spawn_workspace_session as spawn_workspace_session_inner;
 pub(crate) use crate::backend::app_server::WorkspaceSession;
 use crate::backend::events::AppServerEvent;
 use crate::codex_transport::CodexTransportKind;
-use crate::event_sink::TauriEventSink;
 use crate::remote_backend;
 use crate::shared::agents_config_core;
 use crate::shared::codex_core::{self, insert_optional_nullable_string};
@@ -35,8 +33,11 @@ fn emit_thread_live_event(app: &AppHandle, workspace_id: &str, method: &str, par
 
 /// Spawn a workspace session.
 ///
-/// Transport selection (WebSocket vs stdio) and fallback are handled
-/// automatically by the transport factory inside `app_server.rs`.
+/// Goes through the V1 `CodexSessionManager` so the new
+/// `codex/sessionStatus` Tauri event fires (`Starting → Connected →
+/// Initialized` on success; `Crashed` with `lastError` on failure).
+/// Transport selection (WebSocket vs stdio) and fallback are still handled
+/// automatically by the transport factory.
 pub(crate) async fn spawn_workspace_session(
     entry: WorkspaceEntry,
     default_codex_bin: Option<String>,
@@ -44,28 +45,26 @@ pub(crate) async fn spawn_workspace_session(
     app_handle: AppHandle,
     codex_home: Option<PathBuf>,
 ) -> Result<Arc<WorkspaceSession>, String> {
-    let client_version = app_handle.package_info().version.to_string();
+    let state = app_handle.state::<AppState>();
 
     // Read the persisted transport preference from settings.  The env var
     // `XIAOPANGXIE_CODEX_TRANSPORT` will still take precedence inside the
     // factory; this only acts as the user-visible default.
     let transport_kind: Option<CodexTransportKind> = {
-        let state = app_handle.state::<AppState>();
         let settings = state.app_settings.lock().await;
         Some((&settings.transport_mode).into())
     };
 
-    let event_sink = TauriEventSink::new(app_handle);
-    spawn_workspace_session_inner(
-        entry,
-        default_codex_bin,
-        codex_args,
-        codex_home,
-        client_version,
-        event_sink,
-        transport_kind,
-    )
-    .await
+    let session_manager = state.session_manager.clone();
+    session_manager
+        .connect(
+            entry,
+            default_codex_bin,
+            codex_args,
+            codex_home,
+            transport_kind,
+        )
+        .await
 }
 
 #[tauri::command]

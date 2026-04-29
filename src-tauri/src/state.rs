@@ -5,7 +5,9 @@ use tauri::{AppHandle, Manager};
 use tokio::process::Child;
 use tokio::sync::Mutex;
 
+use crate::codex_session::CodexSessionManager;
 use crate::dictation::DictationState;
+use crate::event_sink::TauriEventSink;
 use crate::shared::codex_core::CodexLoginCancelState;
 use crate::storage::{read_settings, read_workspaces};
 use crate::types::{AppSettings, TcpDaemonState, TcpDaemonStatus, WorkspaceEntry};
@@ -32,7 +34,16 @@ impl Default for TcpDaemonRuntime {
 
 pub(crate) struct AppState {
     pub(crate) workspaces: Mutex<HashMap<String, WorkspaceEntry>>,
+    /// Legacy per-workspace `WorkspaceSession` map.  Kept for V1 backwards
+    /// compatibility — the existing `codex_core::*_core` helpers still drive
+    /// JSON-RPC traffic through it.  New connect requests are funneled
+    /// through `session_manager` first; the resulting `WorkspaceSession` is
+    /// still inserted here so command handlers don't need to change.
     pub(crate) sessions: Mutex<HashMap<String, Arc<crate::codex::WorkspaceSession>>>,
+    /// V1 lifecycle owner: drives `Starting → Connected → Initialized`,
+    /// emits `codex/sessionStatus` events, and ensures `codex app-server`
+    /// children are torn down on app exit.
+    pub(crate) session_manager: Arc<CodexSessionManager<TauriEventSink, TauriEventSink>>,
     pub(crate) terminal_sessions: Mutex<HashMap<String, Arc<crate::terminal::TerminalSession>>>,
     pub(crate) remote_backend: Mutex<Option<crate::remote_backend::RemoteBackend>>,
     pub(crate) storage_path: PathBuf,
@@ -53,9 +64,16 @@ impl AppState {
         let settings_path = data_dir.join("settings.json");
         let workspaces = read_workspaces(&storage_path).unwrap_or_default();
         let app_settings = read_settings(&settings_path).unwrap_or_default();
+
+        let event_sink = TauriEventSink::new(app.clone());
+        let client_version = app.package_info().version.to_string();
+        let session_manager =
+            CodexSessionManager::new(event_sink.clone(), event_sink, client_version);
+
         Self {
             workspaces: Mutex::new(workspaces),
             sessions: Mutex::new(HashMap::new()),
+            session_manager,
             terminal_sessions: Mutex::new(HashMap::new()),
             remote_backend: Mutex::new(None),
             storage_path,
