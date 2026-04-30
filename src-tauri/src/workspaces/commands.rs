@@ -367,6 +367,13 @@ pub(crate) async fn remove_workspace(
         return Ok(());
     }
 
+    // V1: tear down the session through the manager before the legacy
+    // state.sessions cleanup runs, so the frontend sees a `Stopped`
+    // `codex/sessionStatus` event instead of an EOF-driven
+    // Disconnected/Crashed.  The legacy `kill_session_by_id` inside
+    // `remove_workspace_core` then no-ops on the already-closed transport.
+    state.session_manager.disconnect(&id).await;
+
     workspaces_core::remove_workspace_core(
         id,
         &state.workspaces,
@@ -405,6 +412,9 @@ pub(crate) async fn remove_worktree(
         .await?;
         return Ok(());
     }
+
+    // V1: same Stopped-emit ordering as `remove_workspace`.
+    state.session_manager.disconnect(&id).await;
 
     workspaces_core::remove_worktree_core(
         id,

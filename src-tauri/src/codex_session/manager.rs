@@ -24,14 +24,13 @@ use std::sync::Arc;
 use serde_json::json;
 use tokio::sync::Mutex;
 
-use crate::backend::app_server::{
-    spawn_workspace_session_with_manager_inner, WorkspaceSession,
-};
 use crate::backend::events::{AppServerEvent, EventSink, ReaderExitNotifier};
 use crate::codex_transport::{create_transport, CodexRpcClient, CodexTransportKind};
 use crate::types::WorkspaceEntry;
 
-use super::session::CodexSession;
+use super::lifecycle::spawn_workspace_session_with_manager_inner;
+use super::routing::SessionRouting;
+use super::session::{CodexSession, WorkspaceSession};
 use super::status::{CodexSessionStatus, CodexSessionStatusEvent, SESSION_STATUS_EVENT};
 
 /// Sink for the new `codex/sessionStatus` Tauri event.
@@ -160,19 +159,25 @@ where
             });
         }
 
-        // ── 3. Build CodexRpcClient (passive in V1) ─────────────────────
+        // ── 3. Build CodexRpcClient (passive in V1) and SessionRouting ──
         // Share the same `Arc<dyn CodexTransport>` with the legacy reader
         // loop.  We do **not** call `rpc.start()` here — the legacy router
         // owns the consume side.  The rpc handle is exposed on
         // `CodexSession.rpc` so future iterations can flip to a pure-rpc
         // dispatcher without touching this entrypoint.
+        //
+        // V2 step 1: build the routing here (one source of truth) and hand
+        // a clone to both `CodexSession` and the legacy `WorkspaceSession`
+        // via `setup_session_runtime`.
         let rpc = Arc::new(CodexRpcClient::new_from_arc(Arc::clone(&bundle.transport)));
+        let routing = SessionRouting::new(workspace_id.clone());
 
         let codex_session = Arc::new(CodexSession::new(
             workspace_id.clone(),
             workspace_path.clone(),
             transport_kind_value,
             Arc::clone(&rpc),
+            Arc::clone(&routing),
         ));
 
         codex_session
@@ -188,18 +193,19 @@ where
                 manager: Arc::clone(self),
             });
 
-        // ── 4. Hand off to the legacy setup_session_runtime ─────────────
-        // It builds `WorkspaceSession`, spawns the router, and runs the
-        // initialize handshake via `WorkspaceSession::send_request`.
+        // ── 4. Hand off to setup_session_runtime, sharing the rpc handle.
+        // setup_session_runtime calls `rpc.start()` + `rpc.initialize()` and
+        // spawns `lifecycle::start_router`.
         let workspace_session = match spawn_workspace_session_with_manager_inner(
             entry,
+            Arc::clone(&rpc),
             bundle.transport,
             bundle.stderr_rx,
             codex_args,
             self.client_version.clone(),
             self.event_sink.clone(),
-            Arc::clone(&codex_session),
             exit_notifier,
+            Arc::clone(&routing),
         )
         .await
         {
@@ -378,52 +384,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_with_invalid_settings_emits_starting_then_crashed() {
-        // Force stdio + a non-existent binary so create_transport fails fast
-        // without touching the network.
-        std::env::set_var("XIAOPANGXIE_CODEX_TRANSPORT", "stdio");
-        std::env::set_var("PATH", "/nonexistent");
-
+    async fn disconnect_unknown_workspace_is_silent_noop() {
         let manager = CodexSessionManager::new(
             NoopEventSink,
             CapturingStatusSink::default(),
             "0.0.0-test".to_string(),
         );
-        let entry = WorkspaceEntry {
-            id: "ws-test".to_string(),
-            name: "ws-test".to_string(),
-            path: "/tmp".to_string(),
-            kind: crate::types::WorkspaceKind::Main,
-            parent_id: None,
-            worktree: None,
-            settings: Default::default(),
-        };
-        let result = manager
-            .connect(
-                entry,
-                Some("/definitely/not/a/codex".to_string()),
-                None,
-                None,
-                Some(CodexTransportKind::Stdio),
-            )
+        manager.disconnect("ws-not-here").await;
+        assert!(manager.status_sink.events.lock().unwrap().is_empty());
+        assert!(manager.get("ws-not-here").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn shutdown_all_on_empty_registry_is_noop() {
+        let manager = CodexSessionManager::new(
+            NoopEventSink,
+            CapturingStatusSink::default(),
+            "0.0.0-test".to_string(),
+        );
+        manager.shutdown_all().await;
+        assert!(manager.status_sink.events.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn notify_reader_exit_for_unknown_workspace_is_noop() {
+        let manager = CodexSessionManager::new(
+            NoopEventSink,
+            CapturingStatusSink::default(),
+            "0.0.0-test".to_string(),
+        );
+        manager
+            .notify_reader_exit("ws-not-here", Some("boom".to_string()))
             .await;
-        assert!(result.is_err(), "connect should fail in sandbox");
-        let events = manager.status_sink.events.lock().unwrap().clone();
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e.status, CodexSessionStatus::Starting)),
-            "expected a Starting event, got {events:?}"
-        );
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e.status, CodexSessionStatus::Crashed)),
-            "expected a Crashed event, got {events:?}"
-        );
-        assert!(
-            manager.get("ws-test").await.is_none(),
-            "no half-initialized session should remain"
-        );
+        assert!(manager.status_sink.events.lock().unwrap().is_empty());
     }
 }

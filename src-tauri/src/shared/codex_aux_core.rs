@@ -457,10 +457,10 @@ where
     on_hide_thread(&workspace_id, &thread_id);
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Value>();
-    {
-        let mut callbacks = session.background_thread_callbacks.lock().await;
-        callbacks.insert(thread_id.clone(), tx);
-    }
+    session
+        .routing
+        .register_background_callback(thread_id.clone(), tx)
+        .await;
 
     let mut turn_params = json!({
         "threadId": thread_id,
@@ -478,10 +478,7 @@ where
     let turn_result = match turn_result {
         Ok(result) => result,
         Err(error) => {
-            {
-                let mut callbacks = session.background_thread_callbacks.lock().await;
-                callbacks.remove(&thread_id);
-            }
+            session.routing.take_background_callback(&thread_id).await;
             let archive_params = json!({ "threadId": thread_id.as_str() });
             let _ = session
                 .send_request_for_workspace(&workspace_id, "thread/archive", archive_params)
@@ -495,10 +492,7 @@ where
             .get("message")
             .and_then(|m| m.as_str())
             .unwrap_or(turn_error_fallback);
-        {
-            let mut callbacks = session.background_thread_callbacks.lock().await;
-            callbacks.remove(&thread_id);
-        }
+        session.routing.take_background_callback(&thread_id).await;
         let archive_params = json!({ "threadId": thread_id.as_str() });
         let _ = session
             .send_request_for_workspace(&workspace_id, "thread/archive", archive_params)
@@ -537,10 +531,7 @@ where
     })
     .await;
 
-    {
-        let mut callbacks = session.background_thread_callbacks.lock().await;
-        callbacks.remove(&thread_id);
-    }
+    session.routing.take_background_callback(&thread_id).await;
 
     let archive_params = json!({ "threadId": thread_id });
     let _ = session

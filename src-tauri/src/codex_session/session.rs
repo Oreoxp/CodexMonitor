@@ -1,20 +1,31 @@
-//! `CodexSession` — per-workspace handle that owns an `Arc<CodexRpcClient>`
-//! and tracks lifecycle status / last error.
+//! Per-workspace session handles.
 //!
-//! V1 keeps the existing `WorkspaceSession` (in `backend::app_server`) for
-//! the actual JSON-RPC traffic.  `CodexSession` is the *new* observable layer
-//! the manager exposes; it shares the same underlying transport `Arc` with
-//! `WorkspaceSession`, but does not consume its reader (the legacy router
-//! loop in `app_server::setup_session_runtime` still does that for V1).
+//! Two structs co-live here as of V2 step 3:
 //!
-//! The fields are intentionally minimal — anything router-related stays on
-//! `WorkspaceSession`.
+//! - `CodexSession` — V1 lifecycle / status owner exposed by the manager.
+//!   Holds the `Arc<CodexRpcClient>` and the `Arc<SessionRouting>`.
+//! - `WorkspaceSession` — the legacy handle still used by all existing
+//!   `state.sessions` callers (`shared::codex_core`, `shared::codex_aux_core`,
+//!   etc.).  After V2 step 3 it's just a thin RPC façade: every send_*
+//!   delegates to the same `CodexRpcClient` and every routing helper
+//!   delegates to the same `SessionRouting`.  `child` / `stdin` /
+//!   `transport` slots are kept only for legacy test fixtures.
+//!
+//! Both share the same underlying transport `Arc`, the same rpc, and the
+//! same routing — so `state.sessions` (legacy) and
+//! `state.session_manager.sessions` (V1) are two views of the same state.
 
 use std::sync::Arc;
+
+use serde_json::Value;
+use tokio::process::{Child, ChildStdin};
 use tokio::sync::Mutex;
 
-use crate::codex_transport::{CodexRpcClient, CodexTransportKind};
+use crate::codex_transport::{CodexRpcClient, CodexTransport, CodexTransportKind};
+use crate::shared::process_core::kill_child_process_tree;
 
+use super::lifecycle::{extract_thread_id_from_params, record_response};
+use super::routing::SessionRouting;
 use super::status::CodexSessionStatus;
 
 pub(crate) struct CodexSession {
@@ -27,6 +38,11 @@ pub(crate) struct CodexSession {
     /// reader loop owns the consume side.  Future versions can flip to a
     /// pure-rpc model by enabling `rpc.start()` and rewiring the router.
     pub(crate) rpc: Arc<CodexRpcClient>,
+    /// Per-session routing state.  V2 step 1 lifts this out of
+    /// `WorkspaceSession`; both structs hold the same `Arc<SessionRouting>`
+    /// so the legacy reader loop and the new lifecycle layer observe a
+    /// single source of truth.
+    pub(crate) routing: Arc<SessionRouting>,
     /// Has the manager been told to disconnect this session intentionally?
     /// Used to disambiguate `Stopped` from `Disconnected`/`Crashed` when the
     /// reader exits.
@@ -41,6 +57,7 @@ impl CodexSession {
         workspace_path: String,
         transport_kind: CodexTransportKind,
         rpc: Arc<CodexRpcClient>,
+        routing: Arc<SessionRouting>,
     ) -> Self {
         let created_at_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -52,6 +69,7 @@ impl CodexSession {
             transport_kind,
             created_at_ms,
             rpc,
+            routing,
             intentional_stop: Mutex::new(false),
             status: Mutex::new(CodexSessionStatus::Idle),
             last_error: Mutex::new(None),
@@ -98,5 +116,148 @@ impl CodexSession {
     /// Shut down the underlying RPC client / transport.
     pub(crate) async fn shutdown(&self) {
         let _ = self.rpc.shutdown().await;
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// `WorkspaceSession` — the legacy handle every existing call site still
+// uses.  V2 step 3 moved it out of `backend::app_server` so the routing /
+// rpc / lifecycle code lives together; behaviour is unchanged.
+// ──────────────────────────────────────────────────────────────────────
+
+pub(crate) struct WorkspaceSession {
+    pub(crate) codex_args: Option<String>,
+    /// Legacy/test child handle.  Production code leaves `None` —
+    /// process lifecycle is owned by the underlying transport via `rpc`.
+    pub(crate) child: Option<Mutex<Child>>,
+    /// Legacy/test stdin handle.  Same caveat as `child`.
+    pub(crate) stdin: Option<Mutex<ChildStdin>>,
+    /// Held for `is_alive` / `kill`.  Production code holds the same `Arc`
+    /// that `rpc` wraps; tests leave this `None`.
+    pub(crate) transport: Option<Arc<dyn CodexTransport>>,
+    /// All RPC traffic flows through `CodexRpcClient`.  `None` only in
+    /// test fixtures that never invoke `send_*`.
+    pub(crate) rpc: Option<Arc<CodexRpcClient>>,
+    /// Per-session routing state (workspace_ids / workspace_roots /
+    /// thread_workspace / hidden_thread_ids / background_thread_callbacks).
+    /// Shared via `Arc` with the matching `CodexSession`.
+    pub(crate) routing: Arc<SessionRouting>,
+}
+
+impl WorkspaceSession {
+    /// Owner workspace id (immutable, set at construction).
+    pub(crate) fn owner_workspace_id(&self) -> &str {
+        &self.routing.owner_workspace_id
+    }
+
+    pub(crate) async fn register_workspace(&self, workspace_id: &str) {
+        self.routing.register_workspace(workspace_id).await;
+    }
+
+    pub(crate) async fn register_workspace_with_path(
+        &self,
+        workspace_id: &str,
+        workspace_path: Option<&str>,
+    ) {
+        self.routing
+            .register_workspace_with_path(workspace_id, workspace_path)
+            .await;
+    }
+
+    pub(crate) async fn unregister_workspace(&self, workspace_id: &str) {
+        self.routing.unregister_workspace(workspace_id).await;
+    }
+
+    pub(crate) async fn workspace_ids_snapshot(&self) -> Vec<String> {
+        self.routing.workspace_ids_snapshot().await
+    }
+
+    /// Check whether the underlying Codex transport is still alive.
+    pub(crate) async fn is_alive(&self) -> bool {
+        if let Some(ref rpc) = self.rpc {
+            return rpc.transport_is_alive().await;
+        }
+        if let Some(ref transport) = self.transport {
+            return transport.is_alive().await;
+        }
+        if let Some(ref child_mutex) = self.child {
+            let mut child = child_mutex.lock().await;
+            return matches!(child.try_wait(), Ok(None));
+        }
+        false
+    }
+
+    /// Kill the underlying Codex transport.
+    pub(crate) async fn kill(&self) {
+        if let Some(ref rpc) = self.rpc {
+            let _ = rpc.shutdown().await;
+            return;
+        }
+        if let Some(ref transport) = self.transport {
+            let _ = transport.close().await;
+            return;
+        }
+        if let Some(ref child_mutex) = self.child {
+            let mut child = child_mutex.lock().await;
+            kill_child_process_tree(&mut child).await;
+        }
+    }
+
+    pub(crate) async fn send_request(&self, method: &str, params: Value) -> Result<Value, String> {
+        let owner = self.routing.owner_workspace_id.clone();
+        self.send_request_for_workspace(owner.as_str(), method, params)
+            .await
+    }
+
+    /// Send a JSON-RPC request and post-process the response into routing.
+    ///
+    /// Thin wrapper around `CodexRpcClient::request` — response-side
+    /// bookkeeping happens inline via `lifecycle::record_response`.
+    pub(crate) async fn send_request_for_workspace(
+        &self,
+        workspace_id: &str,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, String> {
+        let rpc = self
+            .rpc
+            .as_ref()
+            .ok_or_else(|| "workspace session has no rpc client".to_string())?;
+
+        self.register_workspace(workspace_id).await;
+        if let Some(thread_id) = extract_thread_id_from_params(&params) {
+            self.routing
+                .map_thread_to_workspace(&thread_id, workspace_id)
+                .await;
+        }
+
+        let response = rpc
+            .request(method, params)
+            .await
+            .map_err(|e| e.to_string())?;
+        record_response(&self.routing, workspace_id, method, &response).await;
+        Ok(response)
+    }
+
+    pub(crate) async fn send_notification(
+        &self,
+        method: &str,
+        params: Option<Value>,
+    ) -> Result<(), String> {
+        let rpc = self
+            .rpc
+            .as_ref()
+            .ok_or_else(|| "workspace session has no rpc client".to_string())?;
+        rpc.notify(method, params).await.map_err(|e| e.to_string())
+    }
+
+    pub(crate) async fn send_response(&self, id: Value, result: Value) -> Result<(), String> {
+        let rpc = self
+            .rpc
+            .as_ref()
+            .ok_or_else(|| "workspace session has no rpc client".to_string())?;
+        rpc.send_response(id, result)
+            .await
+            .map_err(|e| e.to_string())
     }
 }

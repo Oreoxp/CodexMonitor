@@ -124,14 +124,15 @@ pub(super) async fn kill_session_by_id(
 mod tests {
     use super::*;
 
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     use std::process::Stdio;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use tokio::process::Command;
     use tokio::sync::Mutex;
 
+    use crate::codex_session::SessionRouting;
     use crate::types::{WorkspaceKind, WorkspaceSettings};
 
     fn make_workspace_entry(id: &str) -> WorkspaceEntry {
@@ -169,15 +170,8 @@ mod tests {
             child: Some(Mutex::new(child)),
             stdin: Some(Mutex::new(stdin)),
             transport: None,
-            pending: Mutex::new(HashMap::new()),
-            request_context: Mutex::new(HashMap::new()),
-            thread_workspace: Mutex::new(HashMap::new()),
-            hidden_thread_ids: Mutex::new(HashSet::new()),
-            next_id: AtomicU64::new(0),
-            background_thread_callbacks: Mutex::new(HashMap::new()),
-            owner_workspace_id: "test-owner".to_string(),
-            workspace_ids: Mutex::new(HashSet::from(["test-owner".to_string()])),
-            workspace_roots: Mutex::new(HashMap::new()),
+            rpc: None,
+            routing: SessionRouting::new("test-owner".to_string()),
         })
     }
 

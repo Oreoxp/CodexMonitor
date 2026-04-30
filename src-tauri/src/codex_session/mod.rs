@@ -11,12 +11,19 @@
 //! shares a transport `Arc` with it via `CodexSession.rpc` and observes
 //! lifecycle transitions.
 
+mod lifecycle;
 mod manager;
+mod routing;
 mod session;
 mod status;
 
+pub(crate) use lifecycle::{
+    extract_thread_id_from_params, record_response, spawn_workspace_session,
+    spawn_workspace_session_with_manager_inner, start_router, start_stderr_forwarder,
+};
 pub(crate) use manager::{CodexSessionManager, SessionStatusSink};
-pub(crate) use session::CodexSession;
+pub(crate) use routing::{normalize_root_path, SessionRouting};
+pub(crate) use session::{CodexSession, WorkspaceSession};
 #[allow(unused_imports)]
 pub(crate) use status::{
     CodexSessionStatus, CodexSessionStatusEvent, SESSION_STATUS_EVENT,

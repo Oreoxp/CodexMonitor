@@ -51,6 +51,12 @@ pub(crate) struct CodexRpcClient {
     shutdown_tx: mpsc::Sender<()>,
     /// Receiver end held to keep the channel alive; taken by `start`.
     shutdown_rx: Mutex<Option<mpsc::Receiver<()>>>,
+    /// One-shot signal published by the reader task on exit.
+    /// Payload: `Some(error_message)` for transport-level errors,
+    /// `None` for clean EOF / explicit shutdown.  Caller takes the receiver
+    /// via `take_exit_signal()` and routes the reason into a status update.
+    exit_signal_tx: Mutex<Option<oneshot::Sender<Option<String>>>>,
+    exit_signal_rx: Mutex<Option<oneshot::Receiver<Option<String>>>>,
 }
 
 impl CodexRpcClient {
@@ -70,6 +76,7 @@ impl CodexRpcClient {
     pub(crate) fn new_from_arc(transport: Arc<dyn CodexTransport>) -> Self {
         let (notification_tx, _) = broadcast::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let (exit_tx, exit_rx) = oneshot::channel();
 
         Self {
             transport,
@@ -78,7 +85,20 @@ impl CodexRpcClient {
             notification_tx,
             shutdown_tx,
             shutdown_rx: Mutex::new(Some(shutdown_rx)),
+            exit_signal_tx: Mutex::new(Some(exit_tx)),
+            exit_signal_rx: Mutex::new(Some(exit_rx)),
         }
+    }
+
+    /// Take the one-shot receiver fired when the reader task exits.
+    ///
+    /// Must be taken at most once (subsequent calls return `None`).
+    /// The payload is `None` for clean EOF / explicit shutdown and
+    /// `Some(message)` if the transport reported an error.
+    pub(crate) async fn take_exit_signal(
+        &self,
+    ) -> Option<oneshot::Receiver<Option<String>>> {
+        self.exit_signal_rx.lock().await.take()
     }
 
     /// Returns the transport kind for this client.
@@ -110,12 +130,14 @@ impl CodexRpcClient {
             .await
             .take()
             .expect("CodexRpcClient::start called more than once");
+        let exit_signal_tx = self.exit_signal_tx.lock().await.take();
 
         let transport = Arc::clone(&self.transport);
         let pending = Arc::clone(&self.pending);
         let notification_tx = self.notification_tx.clone();
 
         tokio::spawn(async move {
+            let mut exit_reason: Option<String> = None;
             loop {
                 tokio::select! {
                     result = transport.recv() => {
@@ -129,6 +151,7 @@ impl CodexRpcClient {
                             }
                             Err(e) => {
                                 eprintln!("[CodexRpcClient] reader error: {e}");
+                                exit_reason = Some(e.to_string());
                                 break;
                             }
                         }
@@ -148,6 +171,13 @@ impl CodexRpcClient {
                         "message": "transport closed"
                     }
                 }));
+            }
+
+            // Publish the reader-exit reason so the lifecycle layer can
+            // route it into `Disconnected` / `Crashed`.  `None` on clean
+            // EOF / explicit shutdown, `Some(msg)` on transport error.
+            if let Some(tx) = exit_signal_tx {
+                let _ = tx.send(exit_reason);
             }
         });
     }

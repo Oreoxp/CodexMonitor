@@ -1,6 +1,8 @@
 #[allow(dead_code)]
 #[path = "../backend/mod.rs"]
 mod backend;
+#[path = "../codex_session/mod.rs"]
+mod codex_session;
 #[allow(dead_code)]
 #[path = "../codex_transport/mod.rs"]
 mod codex_transport;
@@ -1577,7 +1579,6 @@ mod tests {
     use std::future::Future;
     use std::path::PathBuf;
     use std::process::Stdio;
-    use std::sync::atomic::AtomicU64;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tokio::process::Command;
@@ -1676,15 +1677,8 @@ mod tests {
             child: Some(Mutex::new(child)),
             stdin: Some(Mutex::new(stdin)),
             transport: None,
-            pending: Mutex::new(HashMap::new()),
-            request_context: Mutex::new(HashMap::new()),
-            thread_workspace: Mutex::new(HashMap::new()),
-            hidden_thread_ids: Mutex::new(HashSet::new()),
-            next_id: AtomicU64::new(0),
-            background_thread_callbacks: Mutex::new(HashMap::new()),
-            workspace_ids: Mutex::new(HashSet::from([owner_workspace_id.clone()])),
-            workspace_roots: Mutex::new(HashMap::new()),
-            owner_workspace_id,
+            rpc: None,
+            routing: codex_session::SessionRouting::new(owner_workspace_id),
         })
     }
 
