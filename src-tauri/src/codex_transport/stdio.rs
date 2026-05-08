@@ -43,7 +43,7 @@ impl StdioTransport {
     /// * `codex_bin` — Optional path to the `codex` binary.
     /// * `codex_args` — Optional extra CLI arguments.
     /// * `cwd` — Working directory for the child process.
-    /// * `codex_home` — Optional `OPENCRAB_HOME` environment variable override
+    /// * `codex_home` — Optional `CODEX_HOME` environment variable override
     ///   passed to the child process so that the backend uses the same home
     ///   directory (defaults to `~/.opencrab`).
     ///
@@ -70,8 +70,10 @@ impl StdioTransport {
 
         command.current_dir(cwd);
         if let Some(path) = codex_home {
-            // 与上游 codex 的 branding 常量保持一致:OPENCRAB_HOME 是新的 home 环境变量。
-            command.env("OPENCRAB_HOME", path);
+            // codex-rs 的 `find_codex_home()` 只认 `CODEX_HOME`(不认 `OPENCRAB_HOME`),
+            // 默认会 fallback 到 `~/.codex`,导致读不到我们写在 `~/.opencrab/config.toml`
+            // 里的 provider / bearer token。这里显式把子进程指向 OpenCrab 的 home。
+            command.env("CODEX_HOME", path);
         }
         command.stdin(std::process::Stdio::piped());
         command.stdout(std::process::Stdio::piped());
