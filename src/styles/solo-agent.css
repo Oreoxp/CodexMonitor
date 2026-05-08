@@ -1,0 +1,78 @@
+.solo-agent-test-trigger {
+  position: fixed;
+  top: 40px;
+  left: 12px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  -webkit-app-region: no-drag;
+}
+
+.solo-agent-test-button {
+  font-size: 11px;
+  padding: 3px 8px;
+  opacity: 0.7;
+}
+
+.solo-agent-test-button:hover {
+  opacity: 1;
+}
+
+.solo-agent-test-error {
+  font-size: 10px;
+  color: var(--color-error, #e05252);
+  max-width: 200px;
+  overflow-wrap: anywhere;
+}
+
+.solo-plan-review-viewport {
+  z-index: 6;
+}
+
+.solo-plan-review-toast {
+  --ds-toast-enter-duration: 0.2s;
+}
+
+.solo-plan-review-steps {
+  margin: 0;
+  padding-left: 16px;
+  display: grid;
+  gap: 4px;
+}
+
+.solo-plan-review-step {
+  font-size: 12px;
+  color: var(--text-secondary, var(--text-faint));
+  overflow-wrap: anywhere;
+}
+
+.solo-plan-review-reject-form {
+  display: grid;
+  gap: 8px;
+}
+
+.solo-plan-review-feedback {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  font-size: 12px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-default, var(--border));
+  border-radius: 4px;
+  background: var(--bg-input, transparent);
+  color: var(--text-primary, inherit);
+  font-family: inherit;
+}
+
+.solo-plan-review-feedback:focus {
+  outline: none;
+  border-color: var(--accent-primary, var(--color-accent));
+}
+
+.solo-plan-review-error {
+  font-size: 11px;
+  color: var(--color-error, #e05252);
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}

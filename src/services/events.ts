@@ -117,6 +117,17 @@ const menuComposerCycleCollaborationHub = createEventHub<void>(
   "menu-composer-cycle-collaboration",
 );
 
+export type LangGraphEventPayload = {
+  type: "evt";
+  thread_id: string;
+  kind: string;
+  [key: string]: unknown;
+};
+
+const langGraphEventHub = createEventHub<LangGraphEventPayload>(
+  "opencrab://langgraph-event",
+);
+
 export function subscribeAppServerEvents(
   onEvent: (event: AppServerEvent) => void,
   options?: SubscriptionOptions,
@@ -349,6 +360,13 @@ export function subscribeMenuComposerCycleReasoning(
   return menuComposerCycleReasoningHub.subscribe(() => {
     onEvent();
   }, options);
+}
+
+export function subscribeLangGraphEvents(
+  onEvent: (event: LangGraphEventPayload) => void,
+  options?: SubscriptionOptions,
+): Unsubscribe {
+  return langGraphEventHub.subscribe(onEvent, options);
 }
 
 export function subscribeMenuComposerCycleCollaboration(

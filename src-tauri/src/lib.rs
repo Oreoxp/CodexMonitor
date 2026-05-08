@@ -9,6 +9,7 @@ use tauri::WindowEvent;
 mod backend;
 mod codex;
 mod codex_session;
+mod codex_solo;
 mod codex_transport;
 mod daemon_binary;
 mod dictation;
@@ -16,6 +17,7 @@ mod event_sink;
 mod files;
 mod git;
 mod git_utils;
+mod langgraph_sidecar;
 mod local_usage;
 #[cfg(desktop)]
 mod menu;
@@ -320,6 +322,10 @@ pub fn run() {
             tailscale::tailscale_daemon_start,
             tailscale::tailscale_daemon_stop,
             tailscale::tailscale_daemon_status,
+            langgraph_sidecar::langgraph_sidecar_ping,
+            langgraph_sidecar::langgraph_sidecar_invoke,
+            langgraph_sidecar::langgraph_sidecar_get_state,
+            langgraph_sidecar::langgraph_sidecar_resume,
             is_mobile_runtime
         ])
         .build(tauri::generate_context!())

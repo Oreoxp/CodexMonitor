@@ -119,6 +119,81 @@ export async function getCodexConfigPath(): Promise<string> {
   return invoke<string>("get_codex_config_path");
 }
 
+export type LangGraphSidecarPingResult = {
+  ok: boolean;
+  pong: boolean;
+  source: string;
+  command: string;
+  cwd: string | null;
+  pid: number | null;
+};
+
+export type LangGraphSidecarInvokeInput = {
+  goal: string;
+  threadId?: string | null;
+  workspaceId?: string | null;
+  workspaceCwd?: string | null;
+};
+
+export type LangGraphSidecarInvokeResult = {
+  thread_id: string;
+  request_id: string;
+  ok: boolean;
+  completed: boolean;
+  data: unknown;
+};
+
+export async function langGraphSidecarPing(): Promise<LangGraphSidecarPingResult> {
+  return invoke<LangGraphSidecarPingResult>("langgraph_sidecar_ping");
+}
+
+export async function langGraphSidecarInvoke(
+  input: LangGraphSidecarInvokeInput,
+): Promise<LangGraphSidecarInvokeResult> {
+  return invoke<LangGraphSidecarInvokeResult>("langgraph_sidecar_invoke", {
+    goal: input.goal,
+    threadId: input.threadId ?? null,
+    workspaceId: input.workspaceId ?? null,
+    workspaceCwd: input.workspaceCwd ?? null,
+  });
+}
+
+export type LangGraphSidecarGetStateInput = {
+  threadId: string;
+  workspaceId?: string | null;
+  workspaceCwd?: string | null;
+};
+
+export type LangGraphSidecarResumeInput = {
+  threadId: string;
+  action: "approve" | "reject";
+  feedback?: string | null;
+  workspaceId?: string | null;
+  workspaceCwd?: string | null;
+};
+
+export async function langGraphSidecarGetState(
+  input: LangGraphSidecarGetStateInput,
+): Promise<unknown> {
+  return invoke<unknown>("langgraph_sidecar_get_state", {
+    threadId: input.threadId,
+    workspaceId: input.workspaceId ?? null,
+    workspaceCwd: input.workspaceCwd ?? null,
+  });
+}
+
+export async function langGraphSidecarResume(
+  input: LangGraphSidecarResumeInput,
+): Promise<unknown> {
+  return invoke<unknown>("langgraph_sidecar_resume", {
+    threadId: input.threadId,
+    action: input.action,
+    feedback: input.feedback ?? null,
+    workspaceId: input.workspaceId ?? null,
+    workspaceCwd: input.workspaceCwd ?? null,
+  });
+}
+
 export type TextFileResponse = {
   exists: boolean;
   content: string;

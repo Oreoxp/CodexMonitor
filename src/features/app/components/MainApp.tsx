@@ -80,6 +80,7 @@ import {
 import { useAppShellOrchestration } from "@app/orchestration/useLayoutOrchestration";
 import { normalizeCodexArgsInput } from "@/utils/codexArgsInput";
 import { subscribeTrayOpenThread } from "@services/events";
+import { SoloAgentApprovalHost } from "@/features/solo-agent/components/SoloAgentApprovalHost";
 
 const SettingsView = lazy(() =>
   import("@settings/components/SettingsView").then((module) => ({
@@ -1877,5 +1878,10 @@ export default function MainApp() {
     },
   });
 
-  return <MainAppShell {...mainAppShellProps} />;
+  return (
+    <>
+      <MainAppShell {...mainAppShellProps} />
+      <SoloAgentApprovalHost workspaceCwd={activeWorkspace?.path ?? null} />
+    </>
+  );
 }
