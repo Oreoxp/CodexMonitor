@@ -1,3 +1,5 @@
+use std::fs;
+use std::path::Path;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -54,13 +56,6 @@ pub(crate) async fn run_codex_task(
     if req.input.prompt.trim().is_empty() {
         return Err("codex_run_task requires non-empty prompt".to_string());
     }
-    if req.input.allow_file_write {
-        return Err(
-            "codex_run_task currently rejects allow_file_write=true (read-only nodes only)"
-                .to_string(),
-        );
-    }
-
     let workspace_path = {
         let workspaces = state.workspaces.lock().await;
         workspaces
@@ -86,6 +81,7 @@ pub(crate) async fn run_codex_task(
         .codex_thread_id
         .clone()
         .or_else(|| req.input.codex_thread_id.clone())
+        .or_else(|| read_codex_thread_id_from_mission(&workspace_path, &req.thread_id))
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
 
@@ -120,12 +116,22 @@ pub(crate) async fn run_codex_task(
         .register_background_callback(codex_thread_id.clone(), tx)
         .await;
 
+    let sandbox_policy = if req.input.allow_file_write {
+        json!({
+            "type": "workspaceWrite",
+            "writableRoots": [workspace_path.clone()],
+            "networkAccess": true
+        })
+    } else {
+        json!({ "type": "readOnly" })
+    };
+
     let turn_params = json!({
         "threadId": codex_thread_id,
         "input": [{ "type": "text", "text": req.input.prompt }],
         "cwd": workspace_path,
         "approvalPolicy": "never",
-        "sandboxPolicy": { "type": "readOnly" },
+        "sandboxPolicy": sandbox_policy,
     });
     let turn_result = session
         .send_request_for_workspace(&req.workspace_id, "turn/start", turn_params)
@@ -213,6 +219,34 @@ pub(crate) async fn run_codex_task(
         raw_text: trimmed,
         phase: req.input.phase.clone(),
     })
+}
+
+fn read_codex_thread_id_from_mission(workspace_path: &str, solo_thread_id: &str) -> Option<String> {
+    let mission_path = Path::new(workspace_path)
+        .join(".opencrab")
+        .join("threads")
+        .join(encode_thread_id_component(solo_thread_id))
+        .join("mission.json");
+    let text = fs::read_to_string(mission_path).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    value
+        .pointer("/codex/codex_thread_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn encode_thread_id_component(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 fn extract_thread_id(response: &Value) -> Option<String> {
