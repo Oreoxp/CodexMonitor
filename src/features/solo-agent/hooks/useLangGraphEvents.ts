@@ -4,20 +4,9 @@ import {
   subscribeLangGraphEvents,
   type LangGraphEventPayload,
 } from "@services/events";
+import type { PendingPlanApproval } from "../components/types";
 
-export type PlanReviewDraft = {
-  summary: string;
-  steps: string[];
-  revision: number;
-};
-
-export type PendingPlanApproval = {
-  thread_id: string;
-  node: string;
-  draft: PlanReviewDraft;
-};
-
-function extractPlanReview(event: LangGraphEventPayload): PendingPlanApproval | null {
+export function extractPlanReview(event: LangGraphEventPayload): PendingPlanApproval | null {
   if (event.kind !== "approval_required") {
     return null;
   }
@@ -52,10 +41,17 @@ function extractPlanReview(event: LangGraphEventPayload): PendingPlanApproval | 
   };
 }
 
-export function useLangGraphEvents() {
+type UseLangGraphEventsOptions = {
+  onEvent?: (event: LangGraphEventPayload) => void;
+};
+
+export function useLangGraphEvents(options: UseLangGraphEventsOptions = {}) {
+  const { onEvent } = options;
   const [pendingApprovals, setPendingApprovals] = useState<PendingPlanApproval[]>([]);
 
   const handleEvent = useCallback((event: LangGraphEventPayload) => {
+    onEvent?.(event);
+
     const planReview = extractPlanReview(event);
     if (planReview) {
       setPendingApprovals((prev) => {
@@ -68,7 +64,7 @@ export function useLangGraphEvents() {
       const threadId = event.thread_id;
       setPendingApprovals((prev) => prev.filter((p) => p.thread_id !== threadId));
     }
-  }, []);
+  }, [onEvent]);
 
   useTauriEvent(subscribeLangGraphEvents, handleEvent);
 

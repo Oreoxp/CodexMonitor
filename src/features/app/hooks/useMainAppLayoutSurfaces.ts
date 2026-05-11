@@ -1,5 +1,6 @@
 import type { RefObject } from "react";
 import type { AppSettings, ComposerEditorSettings, WorkspaceInfo } from "@/types";
+import type { AppMode } from "@/features/solo-agent/components/types";
 import type { ThreadState } from "@/features/threads/hooks/useThreadsReducer";
 import type { WorkspaceLaunchScriptsState } from "@app/hooks/useWorkspaceLaunchScripts";
 import { REMOTE_THREAD_POLL_INTERVAL_MS } from "@app/hooks/useRemoteThreadRefreshOnFocus";
@@ -17,6 +18,8 @@ type MainHeaderProps = NonNullable<LayoutNodesOptions["primary"]["mainHeaderProp
 type GitDiffPanelProps = LayoutNodesOptions["git"]["gitDiffPanelProps"];
 
 type UseMainAppLayoutSurfacesArgs = {
+  appMode: AppMode;
+  onAppModeChange: (mode: AppMode) => void;
   appSettings: Pick<
     AppSettings,
     | "usageShowRemaining"
@@ -233,6 +236,8 @@ type MainAppLayoutSurfacesContext = UseMainAppLayoutSurfacesArgs & {
 };
 
 function buildPrimarySurface({
+  appMode,
+  onAppModeChange,
   appSettings,
   workspaces,
   groupedWorkspaces,
@@ -377,6 +382,8 @@ function buildPrimarySurface({
 }: MainAppLayoutSurfacesContext): LayoutNodesOptions["primary"] {
   return {
     sidebarProps: {
+      mode: appMode,
+      onModeChange: onAppModeChange,
       workspaces,
       groupedWorkspaces,
       hasWorkspaceGroups: workspaceGroupsCount > 0,
@@ -940,6 +947,8 @@ function buildSecondarySurface({
 }
 
 export function useMainAppLayoutSurfaces({
+  appMode,
+  onAppModeChange,
   appSettings,
   workspaces,
   groupedWorkspaces,
@@ -1103,6 +1112,8 @@ export function useMainAppLayoutSurfaces({
   const sidebarAccount = activeWorkspace ? activeAccount : homeAccount;
   const context: MainAppLayoutSurfacesContext = {
     appSettings,
+    appMode,
+    onAppModeChange,
     workspaces,
     groupedWorkspaces,
     workspaceGroupsCount,

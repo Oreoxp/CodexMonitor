@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { PendingPlanApproval } from "../hooks/useLangGraphEvents";
+import type { PendingPlanApproval } from "./types";
 import {
   ToastActions,
   ToastCard,
@@ -11,6 +11,7 @@ import {
 type Props = {
   approvals: PendingPlanApproval[];
   workspaceCwd?: string | null;
+  embedded?: boolean;
   onApprove: (threadId: string) => Promise<void>;
   onReject: (threadId: string, feedback: string) => Promise<void>;
 };
@@ -152,21 +153,36 @@ function PlanReviewCardItem({ approval, onApprove, onReject }: SingleCardProps) 
   );
 }
 
-export function SoloPlanReviewCard({ approvals, onApprove, onReject }: Props) {
+export function SoloPlanReviewCard({
+  approvals,
+  embedded = false,
+  onApprove,
+  onReject,
+}: Props) {
   if (!approvals.length) {
     return null;
   }
 
+  const cards = approvals.map((approval) => (
+    <PlanReviewCardItem
+      key={`${approval.thread_id}-${approval.draft.revision}`}
+      approval={approval}
+      onApprove={onApprove}
+      onReject={onReject}
+    />
+  ));
+
+  if (embedded) {
+    return (
+      <div className="solo-plan-review-inline" role="region" aria-live="polite">
+        {cards}
+      </div>
+    );
+  }
+
   return (
     <ToastViewport className="approval-toasts solo-plan-review-viewport" role="region" ariaLive="assertive">
-      {approvals.map((approval) => (
-        <PlanReviewCardItem
-          key={`${approval.thread_id}-${approval.draft.revision}`}
-          approval={approval}
-          onApprove={onApprove}
-          onReject={onReject}
-        />
-      ))}
+      {cards}
     </ToastViewport>
   );
 }

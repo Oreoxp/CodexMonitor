@@ -4,6 +4,7 @@ import { DesktopLayout } from "../../layout/components/DesktopLayout";
 import { TabletLayout } from "../../layout/components/TabletLayout";
 import { PhoneLayout } from "../../layout/components/PhoneLayout";
 type AppLayoutProps = {
+  appMode: "code" | "solo";
   isPhone: boolean;
   isTablet: boolean;
   showHome: boolean;
@@ -36,6 +37,7 @@ type AppLayoutProps = {
   compactEmptyCodexNode: ReactNode;
   compactEmptyGitNode: ReactNode;
   compactGitBackNode: ReactNode;
+  soloNode: ReactNode;
   onSidebarResizeStart: (event: MouseEvent<HTMLDivElement>) => void;
   onChatDiffSplitPositionResizeStart: (event: MouseEvent<HTMLDivElement>) => void;
   onRightPanelResizeStart: (event: MouseEvent<HTMLDivElement>) => void;
@@ -44,6 +46,7 @@ type AppLayoutProps = {
 
 export const AppLayout = memo(function AppLayout({
   isPhone,
+  appMode,
   isTablet,
   showHome,
   showGitDetail,
@@ -75,11 +78,22 @@ export const AppLayout = memo(function AppLayout({
   compactEmptyCodexNode,
   compactEmptyGitNode,
   compactGitBackNode,
+  soloNode,
   onSidebarResizeStart,
   onChatDiffSplitPositionResizeStart,
   onRightPanelResizeStart,
   onPlanPanelResizeStart,
 }: AppLayoutProps) {
+  if (appMode === "solo") {
+    return (
+      <>
+        {updateToastNode}
+        {errorToastsNode}
+        {soloNode}
+      </>
+    );
+  }
+
   if (isPhone) {
     return (
       <PhoneLayout

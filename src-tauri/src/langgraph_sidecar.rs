@@ -6,6 +6,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
+use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::mpsc;
@@ -19,7 +20,7 @@ const LANGGRAPH_EVENT: &str = "opencrab://langgraph-event";
 const SIDECAR_ENV: &str = "OPENCRAB_LANGGRAPH_SIDECAR";
 const PING_ID: &str = "ping-1";
 const PING_TIMEOUT: Duration = Duration::from_secs(5);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[derive(Debug, Serialize)]
 pub(crate) struct LangGraphSidecarPingResult {
@@ -38,6 +39,53 @@ pub(crate) struct LangGraphSidecarInvokeResult {
     ok: bool,
     completed: bool,
     data: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct SoloRunIndex {
+    threads: Option<Vec<SoloRunIndexEntry>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SoloRunIndexEntry {
+    thread_id: String,
+    goal: Option<String>,
+    status: Option<String>,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct SoloRunSummary {
+    thread_id: String,
+    goal: String,
+    title: String,
+    status: String,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+    current_node: Option<String>,
+    phase: Option<String>,
+    workspace_id: Option<String>,
+    codex_thread_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct SoloRunEventsResult {
+    thread_id: String,
+    mission: Option<Value>,
+    events: Vec<Value>,
+    artifacts: Vec<String>,
+    final_report_exists: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct SoloStepDetailResult {
+    thread_id: String,
+    node: String,
+    conversation: Option<Value>,
+    artifacts: Vec<String>,
+    logs: Vec<String>,
+    events: Vec<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -279,6 +327,37 @@ impl LangGraphSidecarHost {
         Ok(response.data)
     }
 
+    pub(crate) async fn continue_run<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        thread_id: String,
+        workspace_cwd: PathBuf,
+        workspace_id: Option<String>,
+    ) -> Result<Value, String> {
+        let thread_id = normalize_required_thread_id(thread_id)?;
+        let request_id = format!("continue-{}", Uuid::new_v4());
+        let request = json!({
+            "type": "req",
+            "id": request_id,
+            "op": "continue",
+            "thread_id": thread_id,
+            "workspace_id": workspace_id.clone().unwrap_or_default(),
+        });
+        let response = self
+            .send_request(
+                app,
+                &SidecarSpawnContext {
+                    workspace_cwd: Some(workspace_cwd),
+                    workspace_id,
+                },
+                &request_id,
+                "continue",
+                request,
+            )
+            .await?;
+        Ok(response.data)
+    }
+
     async fn send_request<R: Runtime>(
         &self,
         app: &AppHandle<R>,
@@ -494,6 +573,60 @@ pub(crate) async fn langgraph_sidecar_resume<R: Runtime>(
         .await
 }
 
+#[tauri::command]
+pub(crate) async fn langgraph_sidecar_continue<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+    thread_id: String,
+    workspace_id: Option<String>,
+    workspace_cwd: Option<String>,
+) -> Result<Value, String> {
+    let (workspace_cwd, workspace_id) =
+        resolve_workspace_target(&state, workspace_id, workspace_cwd).await?;
+    LangGraphSidecarHost::resolve()?
+        .continue_run(&app, thread_id, workspace_cwd, workspace_id)
+        .await
+}
+
+#[tauri::command]
+pub(crate) async fn langgraph_sidecar_list_runs(
+    state: State<'_, AppState>,
+    workspace_id: Option<String>,
+    workspace_cwd: Option<String>,
+) -> Result<Vec<SoloRunSummary>, String> {
+    let (workspace_cwd, workspace_id) =
+        resolve_workspace_target(&state, workspace_id, workspace_cwd).await?;
+    read_solo_run_index(&workspace_cwd, workspace_id).await
+}
+
+#[tauri::command]
+pub(crate) async fn langgraph_sidecar_read_run_events(
+    state: State<'_, AppState>,
+    thread_id: String,
+    workspace_id: Option<String>,
+    workspace_cwd: Option<String>,
+) -> Result<SoloRunEventsResult, String> {
+    let thread_id = normalize_safe_thread_id(thread_id)?;
+    let (workspace_cwd, _workspace_id) =
+        resolve_workspace_target(&state, workspace_id, workspace_cwd).await?;
+    read_solo_run_events(&workspace_cwd, &thread_id).await
+}
+
+#[tauri::command]
+pub(crate) async fn langgraph_sidecar_read_step_detail(
+    state: State<'_, AppState>,
+    thread_id: String,
+    node: String,
+    workspace_id: Option<String>,
+    workspace_cwd: Option<String>,
+) -> Result<SoloStepDetailResult, String> {
+    let thread_id = normalize_safe_thread_id(thread_id)?;
+    let node = normalize_safe_node_name(node)?;
+    let (workspace_cwd, _workspace_id) =
+        resolve_workspace_target(&state, workspace_id, workspace_cwd).await?;
+    read_solo_step_detail(&workspace_cwd, &thread_id, &node).await
+}
+
 async fn resolve_workspace_target(
     state: &State<'_, AppState>,
     workspace_id: Option<String>,
@@ -521,6 +654,271 @@ async fn resolve_workspace_target(
     let cwd = env::current_dir()
         .map_err(|err| format!("failed to resolve current workspace cwd: {err}"))?;
     Ok((cwd, workspace_id))
+}
+
+async fn read_solo_run_index(
+    workspace_cwd: &Path,
+    workspace_id: Option<String>,
+) -> Result<Vec<SoloRunSummary>, String> {
+    let index_path = workspace_cwd.join(".opencrab").join("index.json");
+    let raw = match fs::read_to_string(&index_path).await {
+        Ok(value) => value,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(format!("failed to read Solo index: {err}")),
+    };
+    let parsed: SoloRunIndex =
+        serde_json::from_str(&raw).map_err(|err| format!("failed to parse Solo index: {err}"))?;
+    let mut runs = Vec::new();
+    for entry in parsed.threads.unwrap_or_default() {
+        let thread_id = match normalize_safe_thread_id(entry.thread_id) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let mission = read_mission_json(workspace_cwd, &thread_id).await?;
+        let goal = mission
+            .as_ref()
+            .and_then(|value| value.get("goal"))
+            .and_then(Value::as_str)
+            .or(entry.goal.as_deref())
+            .unwrap_or("")
+            .to_string();
+        let title = make_solo_title(&goal);
+        let status = mission
+            .as_ref()
+            .and_then(|value| value.get("status"))
+            .and_then(Value::as_str)
+            .or(entry.status.as_deref())
+            .unwrap_or("running")
+            .to_string();
+        let created_at = mission
+            .as_ref()
+            .and_then(|value| value.get("created_at"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or(entry.created_at);
+        let updated_at = mission
+            .as_ref()
+            .and_then(|value| value.get("updated_at"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or(entry.updated_at);
+        let codex_thread_id = mission
+            .as_ref()
+            .and_then(|value| value.get("codex"))
+            .and_then(|value| value.get("codex_thread_id"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        runs.push(SoloRunSummary {
+            thread_id,
+            goal,
+            title,
+            status,
+            created_at,
+            updated_at,
+            current_node: None,
+            phase: None,
+            workspace_id: workspace_id.clone(),
+            codex_thread_id,
+        });
+    }
+    runs.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    Ok(runs)
+}
+
+async fn read_solo_run_events(
+    workspace_cwd: &Path,
+    thread_id: &str,
+) -> Result<SoloRunEventsResult, String> {
+    let thread_dir = solo_thread_dir(workspace_cwd, thread_id)?;
+    let mission = read_mission_json(workspace_cwd, thread_id).await?;
+    let events_path = thread_dir.join("events.jsonl");
+    let events_raw = match fs::read_to_string(&events_path).await {
+        Ok(value) => value,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(format!("failed to read Solo events: {err}")),
+    };
+    let mut events = Vec::new();
+    for line in events_raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let event: Value = serde_json::from_str(trimmed)
+            .map_err(|err| format!("failed to parse Solo event line: {err}"))?;
+        events.push(event);
+    }
+
+    let artifacts_dir = thread_dir.join("artifacts");
+    let mut artifacts = Vec::new();
+    let mut final_report_exists = false;
+    match fs::read_dir(&artifacts_dir).await {
+        Ok(mut entries) => {
+            while let Some(entry) = entries
+                .next_entry()
+                .await
+                .map_err(|err| format!("failed to read Solo artifacts: {err}"))?
+            {
+                let file_type = entry
+                    .file_type()
+                    .await
+                    .map_err(|err| format!("failed to inspect Solo artifact: {err}"))?;
+                if !file_type.is_file() {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name == "final_report.md" || name == "final_report.json" {
+                    final_report_exists = true;
+                }
+                artifacts.push(name);
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(format!("failed to open Solo artifacts: {err}")),
+    }
+    artifacts.sort();
+
+    Ok(SoloRunEventsResult {
+        thread_id: thread_id.to_string(),
+        mission,
+        events,
+        artifacts,
+        final_report_exists,
+    })
+}
+
+async fn read_solo_step_detail(
+    workspace_cwd: &Path,
+    thread_id: &str,
+    node: &str,
+) -> Result<SoloStepDetailResult, String> {
+    let thread_dir = solo_thread_dir(workspace_cwd, thread_id)?;
+    let conversation_path = thread_dir.join("conversations").join(format!("{node}.json"));
+    let conversation = match fs::read_to_string(&conversation_path).await {
+        Ok(raw) => serde_json::from_str(&raw)
+            .map(Some)
+            .map_err(|err| format!("failed to parse Solo conversation: {err}"))?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => return Err(format!("failed to read Solo conversation: {err}")),
+    };
+
+    let events_result = read_solo_run_events(workspace_cwd, thread_id).await?;
+    let events = events_result
+        .events
+        .into_iter()
+        .filter(|event| event.get("node").and_then(Value::as_str) == Some(node))
+        .collect::<Vec<_>>();
+
+    let artifacts = list_matching_files(&thread_dir.join("artifacts"), node).await?;
+    let logs = list_matching_files(&thread_dir.join("logs"), node).await?;
+
+    Ok(SoloStepDetailResult {
+        thread_id: thread_id.to_string(),
+        node: node.to_string(),
+        conversation,
+        artifacts,
+        logs,
+        events,
+    })
+}
+
+async fn list_matching_files(dir: &Path, node: &str) -> Result<Vec<String>, String> {
+    let mut files = Vec::new();
+    match fs::read_dir(dir).await {
+        Ok(mut entries) => {
+            while let Some(entry) = entries
+                .next_entry()
+                .await
+                .map_err(|err| format!("failed to read Solo step files: {err}"))?
+            {
+                let file_type = entry
+                    .file_type()
+                    .await
+                    .map_err(|err| format!("failed to inspect Solo step file: {err}"))?;
+                if !file_type.is_file() {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with(node) || name.contains(&format!("{node}.")) {
+                    files.push(name);
+                }
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(format!("failed to open Solo step files: {err}")),
+    }
+    files.sort();
+    Ok(files)
+}
+
+async fn read_mission_json(workspace_cwd: &Path, thread_id: &str) -> Result<Option<Value>, String> {
+    let mission_path = solo_thread_dir(workspace_cwd, thread_id)?.join("mission.json");
+    match fs::read_to_string(&mission_path).await {
+        Ok(raw) => serde_json::from_str(&raw)
+            .map(Some)
+            .map_err(|err| format!("failed to parse Solo mission: {err}")),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(format!("failed to read Solo mission: {err}")),
+    }
+}
+
+fn solo_thread_dir(workspace_cwd: &Path, thread_id: &str) -> Result<PathBuf, String> {
+    let safe_thread_id = normalize_safe_thread_id(thread_id.to_string())?;
+    let root = workspace_cwd.join(".opencrab").join("threads");
+    let thread_dir = root.join(safe_thread_id);
+    let normalized_root = root
+        .canonicalize()
+        .unwrap_or(root.clone());
+    let normalized_thread = thread_dir
+        .canonicalize()
+        .unwrap_or(thread_dir.clone());
+    if normalized_thread.starts_with(&normalized_root) {
+        Ok(thread_dir)
+    } else {
+        Err("invalid Solo thread path".to_string())
+    }
+}
+
+fn normalize_safe_thread_id(thread_id: String) -> Result<String, String> {
+    let thread_id = normalize_required_thread_id(thread_id)?;
+    if thread_id == "." || thread_id == ".." {
+        return Err("thread_id must not be a path segment".to_string());
+    }
+    if thread_id.contains('/') || thread_id.contains('\\') || thread_id.contains("..") {
+        return Err("thread_id must not contain path separators".to_string());
+    }
+    Ok(thread_id)
+}
+
+fn normalize_safe_node_name(node: String) -> Result<String, String> {
+    let node = node.trim().to_string();
+    if node.is_empty() {
+        return Err("node must be non-empty".to_string());
+    }
+    if node == "." || node == ".." || node.contains('/') || node.contains('\\') || node.contains("..") {
+        return Err("node must not contain path separators".to_string());
+    }
+    if !node
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return Err("node contains unsupported characters".to_string());
+    }
+    Ok(node)
+}
+
+fn make_solo_title(goal: &str) -> String {
+    let normalized = goal.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return "Untitled Solo".to_string();
+    }
+    let mut chars = normalized.chars();
+    let title: String = chars.by_ref().take(56).collect();
+    if chars.next().is_some() {
+        let prefix: String = title.chars().take(53).collect();
+        format!("{prefix}...")
+    } else {
+        title
+    }
 }
 
 fn normalize_thread_id(thread_id: Option<String>) -> String {

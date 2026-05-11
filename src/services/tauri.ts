@@ -143,6 +143,36 @@ export type LangGraphSidecarInvokeResult = {
   data: unknown;
 };
 
+export type SoloRunSummary = {
+  thread_id: string;
+  goal: string;
+  title: string;
+  status: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+  current_node?: string | null;
+  phase?: string | null;
+  workspace_id?: string | null;
+  codex_thread_id?: string | null;
+};
+
+export type SoloRunEventsResult = {
+  thread_id: string;
+  mission?: unknown;
+  events: unknown[];
+  artifacts: string[];
+  final_report_exists: boolean;
+};
+
+export type SoloStepDetailResult = {
+  thread_id: string;
+  node: string;
+  conversation: Record<string, unknown> | null;
+  artifacts: string[];
+  logs: string[];
+  events: unknown[];
+};
+
 export async function langGraphSidecarPing(): Promise<LangGraphSidecarPingResult> {
   return invoke<LangGraphSidecarPingResult>("langgraph_sidecar_ping");
 }
@@ -172,6 +202,12 @@ export type LangGraphSidecarResumeInput = {
   workspaceCwd?: string | null;
 };
 
+export type LangGraphSidecarContinueInput = {
+  threadId: string;
+  workspaceId?: string | null;
+  workspaceCwd?: string | null;
+};
+
 export async function langGraphSidecarGetState(
   input: LangGraphSidecarGetStateInput,
 ): Promise<unknown> {
@@ -189,6 +225,52 @@ export async function langGraphSidecarResume(
     threadId: input.threadId,
     action: input.action,
     feedback: input.feedback ?? null,
+    workspaceId: input.workspaceId ?? null,
+    workspaceCwd: input.workspaceCwd ?? null,
+  });
+}
+
+export async function langGraphSidecarContinue(
+  input: LangGraphSidecarContinueInput,
+): Promise<unknown> {
+  return invoke<unknown>("langgraph_sidecar_continue", {
+    threadId: input.threadId,
+    workspaceId: input.workspaceId ?? null,
+    workspaceCwd: input.workspaceCwd ?? null,
+  });
+}
+
+export async function langGraphSidecarListRuns(input: {
+  workspaceId?: string | null;
+  workspaceCwd?: string | null;
+}): Promise<SoloRunSummary[]> {
+  return invoke<SoloRunSummary[]>("langgraph_sidecar_list_runs", {
+    workspaceId: input.workspaceId ?? null,
+    workspaceCwd: input.workspaceCwd ?? null,
+  });
+}
+
+export async function langGraphSidecarReadRunEvents(input: {
+  threadId: string;
+  workspaceId?: string | null;
+  workspaceCwd?: string | null;
+}): Promise<SoloRunEventsResult> {
+  return invoke<SoloRunEventsResult>("langgraph_sidecar_read_run_events", {
+    threadId: input.threadId,
+    workspaceId: input.workspaceId ?? null,
+    workspaceCwd: input.workspaceCwd ?? null,
+  });
+}
+
+export async function langGraphSidecarReadStepDetail(input: {
+  threadId: string;
+  node: string;
+  workspaceId?: string | null;
+  workspaceCwd?: string | null;
+}): Promise<SoloStepDetailResult> {
+  return invoke<SoloStepDetailResult>("langgraph_sidecar_read_step_detail", {
+    threadId: input.threadId,
+    node: input.node,
     workspaceId: input.workspaceId ?? null,
     workspaceCwd: input.workspaceCwd ?? null,
   });

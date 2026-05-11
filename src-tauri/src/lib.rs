@@ -326,6 +326,10 @@ pub fn run() {
             langgraph_sidecar::langgraph_sidecar_invoke,
             langgraph_sidecar::langgraph_sidecar_get_state,
             langgraph_sidecar::langgraph_sidecar_resume,
+            langgraph_sidecar::langgraph_sidecar_continue,
+            langgraph_sidecar::langgraph_sidecar_list_runs,
+            langgraph_sidecar::langgraph_sidecar_read_run_events,
+            langgraph_sidecar::langgraph_sidecar_read_step_detail,
             is_mobile_runtime
         ])
         .build(tauri::generate_context!())

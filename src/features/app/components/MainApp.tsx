@@ -80,7 +80,8 @@ import {
 import { useAppShellOrchestration } from "@app/orchestration/useLayoutOrchestration";
 import { normalizeCodexArgsInput } from "@/utils/codexArgsInput";
 import { subscribeTrayOpenThread } from "@services/events";
-import { SoloAgentApprovalHost } from "@/features/solo-agent/components/SoloAgentApprovalHost";
+import { SoloAgentShell } from "@/features/solo-agent/components/SoloAgentShell";
+import type { AppMode } from "@/features/solo-agent/components/types";
 
 const SettingsView = lazy(() =>
   import("@settings/components/SettingsView").then((module) => ({
@@ -130,6 +131,7 @@ export default function MainApp() {
   const [activeTab, setActiveTab] = useState<
     "home" | "projects" | "codex" | "git" | "log"
   >("codex");
+  const [appMode, setAppMode] = useState<AppMode>("code");
   const tabletTab =
     activeTab === "projects" || activeTab === "home" ? "codex" : activeTab;
   const {
@@ -1576,6 +1578,8 @@ export default function MainApp() {
   });
   const { workspaceHomeNode } = displayNodes;
   const layoutSurfaces = useMainAppLayoutSurfaces({
+    appMode,
+    onAppModeChange: setAppMode,
     appSettings: {
       usageShowRemaining: appSettings.usageShowRemaining,
       composerCodeBlockCopyUseModifier:
@@ -1806,6 +1810,15 @@ export default function MainApp() {
   } = useMainAppLayoutNodes(layoutSurfaces);
 
   const mainMessagesNode = showWorkspaceHome ? workspaceHomeNode : messagesNode;
+  const soloNode = (
+    <SoloAgentShell
+      mode={appMode}
+      onModeChange={setAppMode}
+      workspaces={workspaces}
+      activeWorkspace={activeWorkspace}
+      onSelectWorkspace={selectWorkspace}
+    />
+  );
   const compactThreadConnectionState: "live" | "polling" | "disconnected" =
     !activeWorkspace?.connected
       ? "disconnected"
@@ -1834,6 +1847,7 @@ export default function MainApp() {
       onPullRequestCommentsChange: handleGitPullRequestCommentsChange,
     },
     appLayout: {
+      appMode,
       isPhone,
       isTablet,
       showHome,
@@ -1864,6 +1878,7 @@ export default function MainApp() {
       compactEmptyCodexNode,
       compactEmptyGitNode,
       compactGitBackNode,
+      soloNode,
       onSidebarResizeStart,
       onChatDiffSplitPositionResizeStart,
       onRightPanelResizeStart,
@@ -1879,9 +1894,6 @@ export default function MainApp() {
   });
 
   return (
-    <>
-      <MainAppShell {...mainAppShellProps} />
-      <SoloAgentApprovalHost workspaceCwd={activeWorkspace?.path ?? null} />
-    </>
+    <MainAppShell {...mainAppShellProps} />
   );
 }
