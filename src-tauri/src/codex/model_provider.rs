@@ -103,8 +103,12 @@ pub(crate) fn read_settings() -> Result<ModelProviderSettings, String> {
     // API key is stored under codex's native `experimental_bearer_token` so
     // that codex picks it up for `Authorization: Bearer <token>` without
     // requiring the user to set an environment variable.
+    // Also fall back to `api_key` for configs written by older versions.
     let api_key = provider_table
-        .and_then(|t| t.get("experimental_bearer_token"))
+        .and_then(|t| {
+            t.get("experimental_bearer_token")
+                .or_else(|| t.get("api_key"))
+        })
         .and_then(Item::as_str)
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
@@ -234,8 +238,9 @@ pub(crate) fn write_settings(settings: &ModelProviderSettings) -> Result<(), Str
         "experimental_bearer_token",
         settings.api_key.as_deref(),
     );
-    // Make sure no leftover `env_key` lingers from previous installs — the UI
-    // no longer manages it.
+    // Remove legacy `api_key` and `env_key` fields if present — codex only
+    // recognises `experimental_bearer_token`.
+    set_or_remove_subtable_string(providers_table, &provider_key, "api_key", None);
     set_or_remove_subtable_string(providers_table, &provider_key, "env_key", None);
 
     // codex 当前只接受 `responses`;若用户/历史配置传入 `chat` 或其他

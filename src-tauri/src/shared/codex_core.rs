@@ -471,6 +471,38 @@ pub(crate) fn insert_optional_nullable_string(
     }
 }
 
+fn insert_optional_trimmed_string(
+    params: &mut Map<String, Value>,
+    key: &str,
+    value: Option<String>,
+) {
+    if let Some(value) = value {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            params.insert(key.to_string(), json!(trimmed));
+        }
+    }
+}
+
+fn insert_optional_nullable_trimmed_string(
+    params: &mut Map<String, Value>,
+    key: &str,
+    value: Option<Option<String>>,
+) {
+    match value {
+        Some(Some(value)) => {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                params.insert(key.to_string(), json!(trimmed));
+            }
+        }
+        Some(None) => {
+            params.insert(key.to_string(), Value::Null);
+        }
+        None => {}
+    }
+}
+
 pub(crate) async fn send_user_message_core(
     sessions: &Mutex<HashMap<String, Arc<WorkspaceSession>>>,
     workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
@@ -512,9 +544,9 @@ pub(crate) async fn send_user_message_core(
     params.insert("cwd".to_string(), json!(workspace_path));
     params.insert("approvalPolicy".to_string(), json!(approval_policy));
     params.insert("sandboxPolicy".to_string(), json!(sandbox_policy));
-    params.insert("model".to_string(), json!(model));
-    params.insert("effort".to_string(), json!(effort));
-    insert_optional_nullable_string(&mut params, "serviceTier", service_tier);
+    insert_optional_trimmed_string(&mut params, "model", model);
+    insert_optional_trimmed_string(&mut params, "effort", effort);
+    insert_optional_nullable_trimmed_string(&mut params, "serviceTier", service_tier);
     if let Some(mode) = collaboration_mode {
         if !mode.is_null() {
             params.insert("collaborationMode".to_string(), mode);

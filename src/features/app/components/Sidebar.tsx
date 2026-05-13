@@ -7,7 +7,6 @@ import type {
   ThreadSummary,
   WorkspaceInfo,
 } from "../../../types";
-import type { AppMode } from "@/features/solo-agent/components/types";
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import type { MouseEvent, RefObject } from "react";
 import { FolderOpen } from "lucide-react";
@@ -98,8 +97,6 @@ function groupFlatThreadRowsByTimeBucket(
 }
 
 type SidebarProps = {
-  mode?: AppMode;
-  onModeChange?: (mode: AppMode) => void;
   workspaces: WorkspaceInfo[];
   groupedWorkspaces: WorkspaceGroupSection[];
   hasWorkspaceGroups: boolean;
@@ -161,8 +158,6 @@ type SidebarProps = {
 };
 
 export const Sidebar = memo(function Sidebar({
-  mode = "code",
-  onModeChange,
   workspaces,
   groupedWorkspaces,
   hasWorkspaceGroups,
@@ -879,8 +874,6 @@ export const Sidebar = memo(function Sidebar({
     >
       <div className="sidebar-drag-strip" />
       <SidebarHeader
-        mode={mode}
-        onModeChange={onModeChange}
         onSelectHome={onSelectHome}
         onAddWorkspace={onAddWorkspace}
         onToggleSearch={() => setIsSearchOpen((prev) => !prev)}

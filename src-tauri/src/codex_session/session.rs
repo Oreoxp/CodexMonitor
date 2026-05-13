@@ -28,6 +28,14 @@ use super::lifecycle::{extract_thread_id_from_params, record_response};
 use super::routing::SessionRouting;
 use super::status::CodexSessionStatus;
 
+fn rpc_response_error_message(response: &Value) -> Option<String> {
+    let error = response.get("error")?;
+    if let Some(message) = error.get("message").and_then(Value::as_str) {
+        return Some(message.to_string());
+    }
+    Some(error.to_string())
+}
+
 pub(crate) struct CodexSession {
     pub(crate) workspace_id: String,
     pub(crate) workspace_path: String,
@@ -235,6 +243,9 @@ impl WorkspaceSession {
             .request(method, params)
             .await
             .map_err(|e| e.to_string())?;
+        if let Some(message) = rpc_response_error_message(&response) {
+            return Err(format!("{method} failed: {message}"));
+        }
         record_response(&self.routing, workspace_id, method, &response).await;
         Ok(response)
     }

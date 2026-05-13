@@ -407,9 +407,25 @@ async fn dispatch_notification<E: EventSink>(
 
         // Notifications never carry `result`/`error`, so the second arg to
         // `should_suppress_hidden_thread_event` is always `false`.
+        //
+        // For hidden threads we suppress the UI event emit, but we must still
+        // run the background-callback dispatch below — callbacks are exactly
+        // how solo-agent / background-codex tasks consume hidden-thread events.
         if routing.is_hidden_thread(tid).await
             && should_suppress_hidden_thread_event(method_name, false)
         {
+            // Hidden-thread notifications must still reach background
+            // callbacks — solo / team agents consume hidden-thread events via
+            // exactly this path. Only UI emission is suppressed.
+            let maybe_tx = routing
+                .background_thread_callbacks
+                .lock()
+                .await
+                .get(tid)
+                .cloned();
+            if let Some(tx) = maybe_tx {
+                let _ = tx.send(value.clone());
+            }
             return;
         }
     }

@@ -9,8 +9,6 @@ import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw";
 import Search from "lucide-react/dist/esm/icons/search";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { ModeSwitcher } from "@/features/solo-agent/components/ModeSwitcher";
-import type { AppMode } from "@/features/solo-agent/components/types";
 import type { ThreadListOrganizeMode, ThreadListSortKey } from "../../../types";
 import {
   MenuTrigger,
@@ -20,8 +18,6 @@ import {
 import { useMenuController } from "../hooks/useMenuController";
 
 type SidebarHeaderProps = {
-  mode?: AppMode;
-  onModeChange?: (mode: AppMode) => void;
   onSelectHome: () => void;
   onAddWorkspace: () => void;
   onToggleSearch: () => void;
@@ -36,8 +32,6 @@ type SidebarHeaderProps = {
 };
 
 export function SidebarHeader({
-  mode = "code",
-  onModeChange,
   onSelectHome,
   onAddWorkspace,
   onToggleSearch,
@@ -131,7 +125,6 @@ export function SidebarHeader({
 
   return (
     <div className="sidebar-header-wrap">
-      <ModeSwitcher mode={mode} onModeChange={onModeChange ?? (() => {})} />
       <div className="sidebar-header">
         <div className="sidebar-header-title">
           <div className="sidebar-title-group">
