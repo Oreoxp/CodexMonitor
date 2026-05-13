@@ -8,6 +8,7 @@ import type {
   WorkspaceInfo,
 } from "../../../types";
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { ModeToggle } from "../../team-mode/components/ModeToggle";
 import type { MouseEvent, RefObject } from "react";
 import { FolderOpen } from "lucide-react";
 import { SidebarBottomRail } from "./SidebarBottomRail";
@@ -873,6 +874,9 @@ export const Sidebar = memo(function Sidebar({
       onDrop={onWorkspaceDrop}
     >
       <div className="sidebar-drag-strip" />
+      <div className="sidebar-mode-toggle-row">
+        <ModeToggle />
+      </div>
       <SidebarHeader
         onSelectHome={onSelectHome}
         onAddWorkspace={onAddWorkspace}

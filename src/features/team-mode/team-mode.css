@@ -1,0 +1,348 @@
+/* OpenCrab 3.0 Team Mode (Phase 0a) */
+
+/* ---- Mode toggle pill-tabs (sidebar top row) ----------------------- */
+.sidebar-mode-toggle-row {
+  display: flex;
+  justify-content: center;
+  padding: 8px 12px 6px;
+  border-bottom: 1px solid var(--ds-border-1, rgba(255, 255, 255, 0.08));
+}
+.mode-toggle-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  background: var(--ds-surface-2, rgba(255, 255, 255, 0.06));
+  border-radius: 999px;
+}
+.mode-toggle-tab {
+  appearance: none;
+  padding: 4px 14px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ds-text-2, rgba(245, 245, 247, 0.65));
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 120ms ease, color 120ms ease;
+}
+.mode-toggle-tab:hover:not([data-active="true"]) {
+  color: var(--ds-text-1, #f5f5f7);
+}
+.mode-toggle-tab[data-active="true"] {
+  color: var(--ds-text-1, #1c1c1e);
+  background: var(--ds-surface-0, #ffffff);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18), 0 0 0 1px rgba(0, 0, 0, 0.04);
+  cursor: default;
+}
+
+/* ---- Generic prompt / empty / loading wrapper ---------------------- */
+.team-mode-prompt {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  width: 100%;
+  padding: 24px;
+}
+.team-mode-prompt-card {
+  max-width: 480px;
+  padding: 24px;
+  text-align: center;
+  background: var(--ds-surface-1, #1f1f23);
+  border: 1px solid var(--ds-border-1, rgba(255, 255, 255, 0.12));
+  border-radius: 12px;
+  color: var(--ds-text-1, #f5f5f7);
+}
+.team-mode-prompt-card h2 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+.team-mode-prompt-card p {
+  margin: 0 0 12px;
+  font-size: 13px;
+  opacity: 0.75;
+}
+
+/* ---- Empty state --------------------------------------------------- */
+.team-mode-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  width: 100%;
+  padding: 24px;
+}
+.team-mode-empty-card {
+  max-width: 520px;
+  padding: 32px;
+  text-align: center;
+  background: var(--ds-surface-1, #1f1f23);
+  border: 1px solid var(--ds-border-1, rgba(255, 255, 255, 0.12));
+  border-radius: 16px;
+  color: var(--ds-text-1, #f5f5f7);
+}
+.team-mode-empty-title {
+  margin: 0 0 12px;
+  font-size: 18px;
+}
+.team-mode-empty-body {
+  margin: 0 0 24px;
+  font-size: 13px;
+  line-height: 1.5;
+  opacity: 0.75;
+}
+
+/* ---- Buttons ------------------------------------------------------- */
+.team-mode-button {
+  appearance: none;
+  padding: 8px 16px;
+  font-size: 13px;
+  background: var(--ds-surface-2, #2a2a30);
+  color: var(--ds-text-1, #f5f5f7);
+  border: 1px solid var(--ds-border-1, rgba(255, 255, 255, 0.18));
+  border-radius: 8px;
+  cursor: pointer;
+}
+.team-mode-button:hover:not(:disabled) {
+  background: var(--ds-surface-3, #34343c);
+}
+.team-mode-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.team-mode-button-primary {
+  background: var(--ds-accent, #4f8cff);
+  color: #fff;
+  border-color: transparent;
+}
+.team-mode-button-primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+/* ---- Member grid --------------------------------------------------- */
+.team-mode-grid-wrapper {
+  height: 100%;
+  width: 100%;
+  padding: 24px;
+  overflow: auto;
+  color: var(--ds-text-1, #f5f5f7);
+}
+.team-mode-grid-header {
+  margin-bottom: 16px;
+}
+.team-mode-grid-title {
+  margin: 0;
+  font-size: 18px;
+}
+.team-mode-grid-subtitle {
+  font-size: 12px;
+  opacity: 0.6;
+  margin-top: 4px;
+}
+.team-mode-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+/* ---- Member card --------------------------------------------------- */
+.team-mode-member-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: stretch;
+  padding: 16px;
+  text-align: left;
+  background: var(--ds-surface-1, #1f1f23);
+  color: var(--ds-text-1, #f5f5f7);
+  border: 1px solid var(--ds-border-1, rgba(255, 255, 255, 0.12));
+  border-radius: 12px;
+  cursor: pointer;
+  font: inherit;
+}
+.team-mode-member-card:hover {
+  background: var(--ds-surface-2, #2a2a30);
+  border-color: var(--ds-border-2, rgba(255, 255, 255, 0.22));
+}
+.team-mode-member-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.team-mode-member-name {
+  font-size: 15px;
+  font-weight: 600;
+}
+.team-mode-member-role-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  background: var(--ds-surface-3, #34343c);
+  border-radius: 999px;
+}
+.team-mode-member-model {
+  font-size: 12px;
+  opacity: 0.65;
+  font-family: var(--ds-font-mono, ui-monospace, SFMono-Regular, monospace);
+}
+
+/* ---- Member detail modal ------------------------------------------- */
+.team-mode-detail-card {
+  max-width: 560px;
+  width: 90vw;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.team-mode-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 24px 12px;
+  border-bottom: 1px solid var(--ds-border-1, rgba(255, 255, 255, 0.12));
+}
+.team-mode-detail-name {
+  margin: 0;
+  font-size: 18px;
+}
+.team-mode-detail-body {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 8px 16px;
+  margin: 0;
+  padding: 16px 24px;
+  font-size: 13px;
+  overflow: auto;
+}
+.team-mode-detail-body dt {
+  opacity: 0.55;
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  margin: 0;
+}
+.team-mode-detail-body dd {
+  margin: 0;
+  word-break: break-word;
+}
+.team-mode-detail-mono {
+  font-family: var(--ds-font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: 12px;
+  opacity: 0.85;
+}
+.team-mode-detail-prompt {
+  margin: 0;
+  padding: 12px;
+  background: var(--ds-surface-2, #2a2a30);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--ds-font-mono, ui-monospace, SFMono-Regular, monospace);
+}
+.team-mode-detail-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 24px 20px;
+  border-top: 1px solid var(--ds-border-1, rgba(255, 255, 255, 0.12));
+}
+
+/* ---- Create modal -------------------------------------------------- */
+.team-mode-create-card {
+  max-width: 560px;
+  width: 90vw;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.team-mode-create-header {
+  padding: 20px 24px 12px;
+  border-bottom: 1px solid var(--ds-border-1, rgba(255, 255, 255, 0.12));
+}
+.team-mode-create-header h2 {
+  margin: 0 0 4px;
+  font-size: 17px;
+}
+.team-mode-create-subtitle {
+  margin: 0;
+  font-size: 12px;
+  opacity: 0.65;
+}
+.team-mode-create-body {
+  padding: 12px 24px;
+  max-height: 60vh;
+  overflow: auto;
+}
+.team-mode-create-loading {
+  padding: 16px 0;
+  text-align: center;
+  opacity: 0.65;
+}
+.team-mode-create-error {
+  margin: 8px 0;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: #ff8e8e;
+  background: rgba(255, 80, 80, 0.08);
+  border: 1px solid rgba(255, 80, 80, 0.25);
+  border-radius: 6px;
+}
+.team-mode-template-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.team-mode-template-row {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  width: 100%;
+  padding: 12px 14px;
+  text-align: left;
+  background: var(--ds-surface-1, #1f1f23);
+  color: inherit;
+  border: 1px solid var(--ds-border-1, rgba(255, 255, 255, 0.12));
+  border-radius: 10px;
+  cursor: pointer;
+  font: inherit;
+}
+.team-mode-template-row:hover:not(:disabled) {
+  background: var(--ds-surface-2, #2a2a30);
+}
+.team-mode-template-row:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.team-mode-template-name {
+  font-size: 14px;
+  font-weight: 600;
+}
+.team-mode-template-desc {
+  font-size: 12px;
+  opacity: 0.7;
+  line-height: 1.4;
+}
+.team-mode-template-status {
+  font-size: 11px;
+  opacity: 0.55;
+  margin-top: 4px;
+}
+.team-mode-create-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 24px 20px;
+  border-top: 1px solid var(--ds-border-1, rgba(255, 255, 255, 0.12));
+}

@@ -39,8 +39,14 @@ import "./styles/settings.css";
 import "./styles/compact-base.css";
 import "./styles/compact-phone.css";
 import "./styles/compact-tablet.css";
+import "@/features/team-mode/team-mode.css";
 import { useWindowLabel } from "@/features/layout/hooks/useWindowLabel";
 import MainApp from "@app/components/MainApp";
+import TeamMainApp from "@/features/team-mode/components/TeamMainApp";
+import {
+  AppModeProvider,
+  useAppMode,
+} from "@/features/team-mode/context/AppModeContext";
 
 const AboutView = lazy(() =>
   import("@/features/about/components/AboutView").then((module) => ({
@@ -48,8 +54,9 @@ const AboutView = lazy(() =>
   })),
 );
 
-export default function App() {
+function AppRoot() {
   const windowLabel = useWindowLabel();
+  const [mode] = useAppMode();
 
   if (windowLabel === "about") {
     return (
@@ -59,5 +66,13 @@ export default function App() {
     );
   }
 
-  return <MainApp />;
+  return mode === "team" ? <TeamMainApp /> : <MainApp />;
+}
+
+export default function App() {
+  return (
+    <AppModeProvider>
+      <AppRoot />
+    </AppModeProvider>
+  );
 }

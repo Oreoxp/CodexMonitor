@@ -31,6 +31,7 @@ mod shared;
 mod state;
 mod storage;
 mod tailscale;
+mod team_config;
 #[cfg(desktop)]
 mod terminal;
 #[cfg(not(desktop))]
@@ -224,6 +225,9 @@ pub fn run() {
             workspaces::apply_worktree_changes,
             workspaces::update_workspace_settings,
             workspaces::set_workspace_runtime_codex_args,
+            team_config::read_team_config,
+            team_config::create_team_from_template,
+            team_config::list_templates,
             codex::start_thread,
             codex::send_user_message,
             codex::turn_steer,
