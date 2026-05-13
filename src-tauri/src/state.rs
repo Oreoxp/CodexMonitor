@@ -9,6 +9,7 @@ use crate::codex_session::CodexSessionManager;
 use crate::dictation::DictationState;
 use crate::event_sink::TauriEventSink;
 use crate::shared::codex_core::CodexLoginCancelState;
+use crate::sidecar_session::SidecarSessionManager;
 use crate::storage::{read_settings, read_workspaces};
 use crate::types::{AppSettings, TcpDaemonState, TcpDaemonStatus, WorkspaceEntry};
 
@@ -44,6 +45,8 @@ pub(crate) struct AppState {
     /// emits `codex/sessionStatus` events, and ensures `codex app-server`
     /// children are torn down on app exit.
     pub(crate) session_manager: Arc<CodexSessionManager<TauriEventSink, TauriEventSink>>,
+    /// Phase 1 Spike A: one sidecar (`npx tsx sidecar/src/main.ts`) per workspace.
+    pub(crate) sidecar_sessions: Arc<SidecarSessionManager>,
     pub(crate) terminal_sessions: Mutex<HashMap<String, Arc<crate::terminal::TerminalSession>>>,
     pub(crate) remote_backend: Mutex<Option<crate::remote_backend::RemoteBackend>>,
     pub(crate) storage_path: PathBuf,
@@ -74,6 +77,7 @@ impl AppState {
             workspaces: Mutex::new(workspaces),
             sessions: Mutex::new(HashMap::new()),
             session_manager,
+            sidecar_sessions: Arc::new(SidecarSessionManager::new()),
             terminal_sessions: Mutex::new(HashMap::new()),
             remote_backend: Mutex::new(None),
             storage_path,

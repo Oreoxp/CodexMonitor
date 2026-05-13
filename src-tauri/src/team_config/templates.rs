@@ -78,3 +78,87 @@ pub(crate) fn instantiate_template(template_id: &str) -> Result<TeamConfig, Stri
 
     Ok(config)
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::DateTime;
+    use std::collections::HashSet;
+
+    #[test]
+    fn test_lookup_template_known() {
+        for id in &["solo_pm", "pm_plus_one_dev", "pm_two_dev_qa"] {
+            let json = lookup_template_json(id);
+            assert!(json.is_some(), "missing template {id}");
+            // Smoke-check that the embedded JSON parses as TeamConfig.
+            let _parsed: TeamConfig = serde_json::from_str(json.unwrap())
+                .unwrap_or_else(|e| panic!("template {id} unparseable: {e}"));
+        }
+    }
+
+    #[test]
+    fn test_lookup_template_unknown() {
+        assert!(lookup_template_json("does_not_exist").is_none());
+        assert!(instantiate_template("does_not_exist").is_err());
+    }
+
+    #[test]
+    fn test_instantiate_template_fresh_ids() {
+        let t1 = instantiate_template("solo_pm").unwrap();
+        let t2 = instantiate_template("solo_pm").unwrap();
+
+        assert_ne!(t1.id, t2.id);
+        assert!(t1.id.starts_with("team_"));
+        assert!(t2.id.starts_with("team_"));
+
+        assert_eq!(t1.agents.len(), 1);
+        assert_eq!(t2.agents.len(), 1);
+        assert_ne!(t1.agents[0].id, t2.agents[0].id);
+        assert!(t1.agents[0].id.starts_with("agent_"));
+    }
+
+    #[test]
+    fn test_instantiate_template_reference_remap() {
+        let team = instantiate_template("pm_two_dev_qa").unwrap();
+
+        let agent_ids: HashSet<&str> =
+            team.agents.iter().map(|a| a.id.as_str()).collect();
+
+        // No placeholder ids should leak through.
+        for id in &agent_ids {
+            assert!(
+                !id.starts_with("tmpl_"),
+                "placeholder id leaked into instance: {id}"
+            );
+        }
+
+        // Every subscription publisher + subscriber must resolve to an
+        // instantiated agent id.
+        assert!(!team.subscriptions.is_empty());
+        for sub in &team.subscriptions {
+            assert!(
+                agent_ids.contains(sub.publisher.as_str()),
+                "publisher {} not in agent ids",
+                sub.publisher
+            );
+            for s in &sub.subscribers {
+                assert!(
+                    agent_ids.contains(s.as_str()),
+                    "subscriber {s} not in agent ids"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_instantiate_template_created_at() {
+        let team = instantiate_template("pm_plus_one_dev").unwrap();
+        DateTime::parse_from_rfc3339(&team.created_at).unwrap_or_else(|e| {
+            panic!("created_at not RFC3339: {} ({e})", team.created_at)
+        });
+    }
+}

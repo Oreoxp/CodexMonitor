@@ -128,11 +128,11 @@ mod tests {
     use super::*;
 
     use std::process::Stdio;
-    use std::collections::HashSet;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use tokio::process::Command;
 
+    use crate::codex_session::SessionRouting;
     use crate::types::{WorkspaceKind, WorkspaceSettings};
 
     fn make_workspace_entry(id: &str) -> WorkspaceEntry {
@@ -165,20 +165,18 @@ mod tests {
         let mut child = cmd.spawn().expect("spawn dummy child");
         let stdin = child.stdin.take().expect("dummy child stdin");
 
+        // Post-refactor (`b30c779` / V2 step 3): routing fields moved into
+        // `Arc<SessionRouting>`, and rpc/transport plumbing into `rpc`/
+        // `transport`. Tests that only need a `WorkspaceSession` handle with
+        // a `codex_args` value can leave `rpc` / `transport` as `None` —
+        // `is_alive()` and `kill()` still work via the legacy `child` slot.
         WorkspaceSession {
             codex_args,
             child: Some(Mutex::new(child)),
             stdin: Some(Mutex::new(stdin)),
             transport: None,
-            pending: Mutex::new(HashMap::new()),
-            request_context: Mutex::new(HashMap::new()),
-            thread_workspace: Mutex::new(HashMap::new()),
-            hidden_thread_ids: Mutex::new(HashSet::new()),
-            next_id: AtomicU64::new(0),
-            background_thread_callbacks: Mutex::new(HashMap::new()),
-            owner_workspace_id: "test-owner".to_string(),
-            workspace_ids: Mutex::new(HashSet::from(["test-owner".to_string()])),
-            workspace_roots: Mutex::new(HashMap::new()),
+            rpc: None,
+            routing: SessionRouting::new("test-owner".to_string()),
         }
     }
 

@@ -28,6 +28,7 @@ mod remote_backend;
 mod rules;
 mod settings;
 mod shared;
+mod sidecar_session;
 mod state;
 mod storage;
 mod tailscale;
@@ -324,6 +325,10 @@ pub fn run() {
             tailscale::tailscale_daemon_start,
             tailscale::tailscale_daemon_stop,
             tailscale::tailscale_daemon_status,
+            sidecar_session::commands::start_sidecar,
+            sidecar_session::commands::sidecar_bump,
+            sidecar_session::commands::sidecar_read,
+            sidecar_session::commands::stop_sidecar,
             is_mobile_runtime
         ])
         .build(tauri::generate_context!())
