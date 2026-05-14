@@ -328,6 +328,7 @@ pub fn run() {
             sidecar_session::commands::start_sidecar,
             sidecar_session::commands::sidecar_bump,
             sidecar_session::commands::sidecar_read,
+            sidecar_session::commands::sidecar_pm_say,
             sidecar_session::commands::stop_sidecar,
             is_mobile_runtime
         ])

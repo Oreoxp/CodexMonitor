@@ -1,15 +1,15 @@
 // Sidecar session — owns one `npx tsx sidecar/src/main.ts` child process and
-// wraps it in a tiny JSON-RPC-ish request/response client.
+// wraps it in a tiny JSON-RPC-ish bidirectional request/response client.
 //
-// Phase 1 Spike A scope:
-//   * single child per workspace
-//   * ndjson request/response over stdin/stdout
-//   * no push notifications, no reconnect, no health check, no graceful close
-//   * stderr is forwarded to the host's stderr with a `[sidecar/<ws>]` tag
+// Two directions share stdin/stdout:
+//   * Tauri → sidecar request (`type: "req"`) — sidecar replies with `res`.
+//   * sidecar → Tauri request (`type: "req"`) — Tauri replies with `res`.
+// The reader demuxes by `type` and dispatches inbound `req` frames to
+// `inbound_ops::dispatch_inbound_op`.
 //
-// Future phases will likely add a notification broadcast channel (mirrors
-// `codex_transport::rpc_client`) and a typed protocol module shared with the
-// sidecar TS source.
+// Spike scope: no notification channel, no reconnect, no health check, no
+// graceful close. stderr is forwarded to host stderr with a `[sidecar/<ws>]`
+// tag.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -19,11 +19,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
+use tauri::{AppHandle, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::{oneshot, Mutex};
 use tokio::time::timeout;
+
+use super::inbound_ops::dispatch_inbound_op;
+use crate::state::AppState;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -47,24 +51,23 @@ struct SidecarResponse {
 }
 
 type PendingMap = Arc<Mutex<HashMap<String, oneshot::Sender<SidecarResponse>>>>;
+type SharedStdin = Arc<Mutex<ChildStdin>>;
 
 pub(crate) struct SidecarSession {
     pub(crate) workspace_id: String,
     pub(crate) workspace_path: String,
     child: Mutex<Child>,
-    stdin: Mutex<ChildStdin>,
+    stdin: SharedStdin,
     pending: PendingMap,
     next_id: AtomicU64,
 }
 
 impl SidecarSession {
-    /// Spawn `npx tsx src/main.ts` inside the repo's `sidecar/` directory and
-    /// wire up stdout/stderr reader tasks. Does NOT run the `init` op — caller
-    /// is responsible for that (so the command layer can surface init errors
-    /// distinctly from spawn errors).
+    /// Spawn `npx tsx src/main.ts` inside the repo's `sidecar/` directory.
     pub(crate) async fn spawn(
         workspace_id: String,
         workspace_path: String,
+        app_handle: AppHandle,
     ) -> Result<Arc<Self>, String> {
         let sidecar_dir = resolve_sidecar_dir()?;
 
@@ -75,15 +78,26 @@ impl SidecarSession {
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
 
-        let mut child = command
-            .spawn()
-            .map_err(|e| format!("failed to spawn sidecar (npx tsx src/main.ts in {}): {}", sidecar_dir.display(), e))?;
+        let mut child = command.spawn().map_err(|e| {
+            format!(
+                "failed to spawn sidecar (npx tsx src/main.ts in {}): {}",
+                sidecar_dir.display(),
+                e
+            )
+        })?;
 
         let stdin = child.stdin.take().ok_or_else(|| "sidecar stdin missing".to_string())?;
-        let stdout = child.stdout.take().ok_or_else(|| "sidecar stdout missing".to_string())?;
-        let stderr = child.stderr.take().ok_or_else(|| "sidecar stderr missing".to_string())?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "sidecar stdout missing".to_string())?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "sidecar stderr missing".to_string())?;
 
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        let stdin_shared: SharedStdin = Arc::new(Mutex::new(stdin));
 
         // stderr reader → host stderr with workspace tag
         {
@@ -96,9 +110,10 @@ impl SidecarSession {
             });
         }
 
-        // stdout reader → demux to pending oneshots
+        // stdout reader → demux res to pending oneshots, req to inbound ops.
         {
             let pending_for_stdout = pending.clone();
+            let stdin_for_inbound = stdin_shared.clone();
             let ws = workspace_id.clone();
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stdout).lines();
@@ -107,28 +122,92 @@ impl SidecarSession {
                     if trimmed.is_empty() {
                         continue;
                     }
-                    match serde_json::from_str::<SidecarResponse>(trimmed) {
-                        Ok(resp) if resp.msg_type == "res" => {
-                            let tx_opt = {
-                                let mut map = pending_for_stdout.lock().await;
-                                map.remove(&resp.id)
-                            };
-                            if let Some(tx) = tx_opt {
-                                let _ = tx.send(resp);
-                            } else {
-                                eprintln!(
-                                    "[sidecar/{}] orphan response id={}",
-                                    ws, resp.id
-                                );
-                            }
+                    let parsed: Value = match serde_json::from_str(trimmed) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!(
+                                "[sidecar/{}] failed to parse stdout line ({}): {}",
+                                ws, e, trimmed
+                            );
+                            continue;
                         }
-                        Ok(_) => eprintln!(
-                            "[sidecar/{}] non-response message ignored: {}",
-                            ws, trimmed
-                        ),
-                        Err(e) => eprintln!(
-                            "[sidecar/{}] failed to parse response ({}): {}",
-                            ws, e, trimmed
+                    };
+                    let msg_type = parsed.get("type").and_then(Value::as_str).unwrap_or("");
+                    match msg_type {
+                        "res" => match serde_json::from_value::<SidecarResponse>(parsed) {
+                            Ok(resp) if resp.msg_type == "res" => {
+                                let tx_opt = {
+                                    let mut map = pending_for_stdout.lock().await;
+                                    map.remove(&resp.id)
+                                };
+                                if let Some(tx) = tx_opt {
+                                    let _ = tx.send(resp);
+                                } else {
+                                    eprintln!(
+                                        "[sidecar/{}] orphan response id={}",
+                                        ws, resp.id
+                                    );
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(e) => eprintln!(
+                                "[sidecar/{}] failed to deserialize res ({}): {}",
+                                ws, e, trimmed
+                            ),
+                        },
+                        "req" => {
+                            let id = parsed
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .map(|s| s.to_string());
+                            let op = parsed
+                                .get("op")
+                                .and_then(Value::as_str)
+                                .map(|s| s.to_string());
+                            let params = parsed.get("params").cloned().unwrap_or(Value::Null);
+                            let (Some(id), Some(op)) = (id, op) else {
+                                eprintln!("[sidecar/{}] malformed inbound req: {}", ws, trimmed);
+                                continue;
+                            };
+                            // Dispatch each inbound op on its own task so
+                            // long-running Codex calls don't block the reader.
+                            let app_handle = app_handle.clone();
+                            let stdin_for_reply = stdin_for_inbound.clone();
+                            let ws_for_task = ws.clone();
+                            tokio::spawn(async move {
+                                let state = app_handle.state::<AppState>();
+                                let result =
+                                    dispatch_inbound_op(state.inner(), &op, &params).await;
+                                let frame = match result {
+                                    Ok(data) => json!({
+                                        "type": "res",
+                                        "id": id,
+                                        "ok": true,
+                                        "data": data,
+                                    }),
+                                    Err(msg) => json!({
+                                        "type": "res",
+                                        "id": id,
+                                        "ok": false,
+                                        "error": { "message": msg },
+                                    }),
+                                };
+                                let mut body = frame.to_string();
+                                body.push('\n');
+                                let mut stdin = stdin_for_reply.lock().await;
+                                if let Err(e) = stdin.write_all(body.as_bytes()).await {
+                                    eprintln!(
+                                        "[sidecar/{}] failed to write reverse-RPC res: {}",
+                                        ws_for_task, e
+                                    );
+                                    return;
+                                }
+                                let _ = stdin.flush().await;
+                            });
+                        }
+                        _ => eprintln!(
+                            "[sidecar/{}] unknown message type `{}`: {}",
+                            ws, msg_type, trimmed
                         ),
                     }
                 }
@@ -139,13 +218,13 @@ impl SidecarSession {
             workspace_id,
             workspace_path,
             child: Mutex::new(child),
-            stdin: Mutex::new(stdin),
+            stdin: stdin_shared,
             pending,
             next_id: AtomicU64::new(1),
         }))
     }
 
-    /// Send one request and await the matching response.
+    /// Send one Tauri → sidecar request and await the matching response.
     pub(crate) async fn send_request(
         &self,
         op: &str,
@@ -220,7 +299,7 @@ fn resolve_sidecar_dir() -> Result<PathBuf, String> {
         .join("sidecar");
     std::fs::canonicalize(&candidate).map_err(|e| {
         format!(
-            "sidecar dir not found at {} ({}). Phase 1 Spike A expects the repo layout `<repo>/sidecar/`.",
+            "sidecar dir not found at {} ({}). Phase 1 Spike expects the repo layout `<repo>/sidecar/`.",
             candidate.display(),
             e
         )

@@ -5,6 +5,7 @@
 // HashMap keyed by workspace_id.
 
 pub(crate) mod commands;
+pub(crate) mod inbound_ops;
 pub(crate) mod manager;
 pub(crate) mod session;
 pub(crate) mod status;

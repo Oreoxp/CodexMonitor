@@ -1,16 +1,17 @@
-// Tauri commands for Phase 1 Spike A.
+// Tauri commands for the Phase 1 sidecar.
 //
 // Surface area:
-//   start_sidecar(workspace_id)  → spawn + init
-//   sidecar_bump(workspace_id)   → pm_bump op
-//   sidecar_read(workspace_id)   → pm_read op
-//   stop_sidecar(workspace_id)   → kill child + drop from manager
+//   start_sidecar(workspace_id)        → spawn + init
+//   sidecar_bump(workspace_id)         → pm_bump op (Spike A)
+//   sidecar_read(workspace_id)         → pm_read op (Spike A/B state)
+//   sidecar_pm_say(workspace_id, text) → pm_say op (Spike B, drives Codex)
+//   stop_sidecar(workspace_id)         → kill child + drop from manager
 //
 // All commands look up `workspace_path` from `AppState.workspaces` by id, so
 // the frontend never has to know paths.
 
 use serde_json::Value;
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use super::session::SidecarSession;
 use crate::state::AppState;
@@ -19,6 +20,7 @@ use crate::state::AppState;
 pub(crate) async fn start_sidecar(
     workspace_id: String,
     state: State<'_, AppState>,
+    app_handle: AppHandle,
 ) -> Result<(), String> {
     if state.sidecar_sessions.has(&workspace_id).await {
         return Err(format!(
@@ -34,7 +36,8 @@ pub(crate) async fn start_sidecar(
             .ok_or_else(|| format!("unknown workspace_id: {}", workspace_id))?
     };
 
-    let session = SidecarSession::spawn(workspace_id.clone(), workspace_path.clone()).await?;
+    let session =
+        SidecarSession::spawn(workspace_id.clone(), workspace_path.clone(), app_handle).await?;
 
     // Run `init` immediately so the sidecar binds to this workspace before any
     // other op can race. If init fails, kill the child so we don't leave an
@@ -76,6 +79,21 @@ pub(crate) async fn sidecar_read(
         .await
         .ok_or_else(|| format!("no sidecar running for workspace `{}`", workspace_id))?;
     session.send_request("pm_read", None).await
+}
+
+#[tauri::command]
+pub(crate) async fn sidecar_pm_say(
+    workspace_id: String,
+    text: String,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    let session = state
+        .sidecar_sessions
+        .get(&workspace_id)
+        .await
+        .ok_or_else(|| format!("no sidecar running for workspace `{}`", workspace_id))?;
+    let params = serde_json::json!({ "text": text, "workspace_id": workspace_id });
+    session.send_request("pm_say", Some(params)).await
 }
 
 #[tauri::command]
