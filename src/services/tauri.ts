@@ -1265,3 +1265,43 @@ export async function createTeamFromTemplate(
 export async function listTemplates(): Promise<TemplateInfo[]> {
   return invoke<TemplateInfo[]>("list_templates");
 }
+
+// Sidecar lifecycle. `start_sidecar` is idempotent and workspace-aware on the
+// Rust side: a no-op if this workspace's sidecar is already running, and it
+// tears down any other workspace's sidecar first.
+export async function startSidecar(workspaceId: string): Promise<void> {
+  return invoke<void>("start_sidecar", { workspaceId });
+}
+
+export async function stopSidecar(workspaceId: string): Promise<void> {
+  return invoke<void>("stop_sidecar", { workspaceId });
+}
+
+// PM chat send. Resolves once the turn has been *dispatched* to Codex — it
+// returns `{ codexThreadId, sent }`, NOT the reply. The PM's reply streams
+// asynchronously as `app-server-event`s filtered by `codexThreadId`.
+export type SidecarPmSayResult = {
+  codexThreadId: string;
+  sent: boolean;
+};
+
+export async function sidecarPmSay(
+  workspaceId: string,
+  text: string,
+): Promise<SidecarPmSayResult> {
+  return invoke<SidecarPmSayResult>("sidecar_pm_say", { workspaceId, text });
+}
+
+// Pre-bootstrap the active agent's Codex thread (no message sent). Returns the
+// agent's Codex thread id so the UI can point the chat stack at it on mount.
+export type EnsureAgentThreadResult = {
+  codexThreadId: string;
+};
+
+export async function ensureAgentThread(
+  workspaceId: string,
+): Promise<EnsureAgentThreadResult> {
+  return invoke<EnsureAgentThreadResult>("sidecar_ensure_agent_thread", {
+    workspaceId,
+  });
+}

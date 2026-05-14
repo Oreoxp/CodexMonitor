@@ -1,14 +1,17 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { readTeamConfig } from "../../../services/tauri";
 import type { TeamConfig } from "../types";
 import { TeamEmptyState } from "./TeamEmptyState";
-import { TeamMemberGrid } from "./TeamMemberGrid";
+import { TeamMemberStrip } from "./TeamMemberStrip";
 
 type TeamHomeProps = {
   workspaceId: string | null;
+  // The reused normal-mode <Messages> element. Rendered as the main chat body
+  // once a team exists; unused in the no-workspace / loading / empty states.
+  messagesSlot: ReactNode;
 };
 
-export function TeamHome({ workspaceId }: TeamHomeProps) {
+export function TeamHome({ workspaceId, messagesSlot }: TeamHomeProps) {
   const [team, setTeam] = useState<TeamConfig | null | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
 
@@ -80,5 +83,12 @@ export function TeamHome({ workspaceId }: TeamHomeProps) {
     );
   }
 
-  return <TeamMemberGrid team={team} />;
+  // Team exists: thin agent roster strip on top, the reused normal-mode chat
+  // body (messages + streaming + history, all driven by activeThreadId) below.
+  return (
+    <div className="team-mode-chat-layout">
+      <TeamMemberStrip team={team} />
+      <div className="team-mode-chat-main">{messagesSlot}</div>
+    </div>
+  );
 }

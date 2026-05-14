@@ -1,6 +1,10 @@
 import { useEffect, useState } from "react";
 import { ModalShell } from "../../design-system/components/modal/ModalShell";
-import { createTeamFromTemplate, listTemplates } from "../../../services/tauri";
+import {
+  createTeamFromTemplate,
+  listTemplates,
+  startSidecar,
+} from "../../../services/tauri";
 import type { TeamConfig, TemplateInfo } from "../types";
 
 type TeamCreateModalProps = {
@@ -34,6 +38,14 @@ export function TeamCreateModal({ workspaceId, onClose, onCreated }: TeamCreateM
     setCreatingId(templateId);
     try {
       const team = await createTeamFromTemplate(workspaceId, templateId);
+      // Team just got a .opencrab/team.json — start its sidecar now. The
+      // TeamMainApp lifecycle effect won't re-fire (activeWorkspaceId is
+      // unchanged), so this is the trigger for the create path. start_sidecar
+      // is idempotent, so overlapping with that effect is harmless. A sidecar
+      // hiccup must not block team creation, so the error is logged, not thrown.
+      await startSidecar(workspaceId).catch((err: unknown) => {
+        console.error("[team-mode] start_sidecar after team create failed", err);
+      });
       onCreated(team);
       onClose();
     } catch (err) {

@@ -69,6 +69,12 @@ async fn stop_managed_daemons_for_exit(app_handle: tauri::AppHandle) {
         let session_manager = state.session_manager.clone();
         session_manager.shutdown_all().await;
     }
+    // Also tear down LangGraph sidecar children so no `npx tsx` is orphaned.
+    {
+        let state = app_handle.state::<state::AppState>();
+        let sidecar_sessions = state.sidecar_sessions.clone();
+        sidecar_sessions.shutdown_all().await;
+    }
     let state = app_handle.state::<state::AppState>();
     let _ = tailscale::tailscale_daemon_stop(state).await;
 }
@@ -80,6 +86,13 @@ fn is_mobile_runtime() -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Repair `PATH` before anything else so a Finder-launched `.app` can find
+    // `npx` etc. (terminal-launched dev inherits the shell `PATH` and never
+    // hits this). Best-effort: a failure just means we keep the inherited env.
+    if let Err(err) = fix_path_env::fix() {
+        eprintln!("opencrab: fix-path-env failed to repair PATH: {err}");
+    }
+
     #[cfg(target_os = "linux")]
     {
         // Avoid WebKit compositing issues on NVIDIA Linux setups (GBM buffer errors).
@@ -329,6 +342,7 @@ pub fn run() {
             sidecar_session::commands::sidecar_bump,
             sidecar_session::commands::sidecar_read,
             sidecar_session::commands::sidecar_pm_say,
+            sidecar_session::commands::sidecar_ensure_agent_thread,
             sidecar_session::commands::stop_sidecar,
             is_mobile_runtime
         ])

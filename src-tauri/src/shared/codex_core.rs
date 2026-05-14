@@ -199,7 +199,7 @@ pub(crate) enum CodexLoginCancelState {
     LoginId(String),
 }
 
-async fn get_session_clone(
+pub(crate) async fn get_session_clone(
     sessions: &Mutex<HashMap<String, Arc<WorkspaceSession>>>,
     workspace_id: &str,
 ) -> Result<Arc<WorkspaceSession>, String> {
@@ -237,7 +237,7 @@ async fn resolve_codex_home_for_workspace_core(
         .ok_or_else(|| "Unable to resolve OPENCRAB_HOME".to_string())
 }
 
-async fn resolve_workspace_path_core(
+pub(crate) async fn resolve_workspace_path_core(
     workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
     workspace_id: &str,
 ) -> Result<String, String> {

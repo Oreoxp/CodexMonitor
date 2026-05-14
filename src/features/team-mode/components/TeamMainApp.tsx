@@ -1,5 +1,7 @@
 import { lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { TeamHome } from "./TeamHome";
+import { useActiveAgentThreadId } from "../hooks/useActiveAgentThreadId";
+import { useTeamModeMessaging } from "../hooks/useTeamModeMessaging";
 import successSoundUrl from "@/assets/success-notification.mp3";
 import errorSoundUrl from "@/assets/error-notification.mp3";
 import { MainAppShell } from "@app/components/MainAppShell";
@@ -81,6 +83,7 @@ import {
 import { useAppShellOrchestration } from "@app/orchestration/useLayoutOrchestration";
 import { normalizeCodexArgsInput } from "@/utils/codexArgsInput";
 import { subscribeTrayOpenThread } from "@services/events";
+import { readTeamConfig, startSidecar, stopSidecar } from "@services/tauri";
 
 const SettingsView = lazy(() =>
   import("@settings/components/SettingsView").then((module) => ({
@@ -189,6 +192,38 @@ export default function TeamMainApp() {
     () => new Map(workspaces.map((workspace) => [workspace.id, workspace])),
     [workspaces],
   );
+
+  // Sidecar lifecycle: the LangGraph sidecar follows Team Mode and the active
+  // workspace. TeamMainApp is mounted exactly while mode === "team" (App.tsx),
+  // so this effect's mount/cleanup cover enter/exit Team Mode, and the
+  // activeWorkspaceId dependency covers workspace switches:
+  //   - enter Team Mode / switch to a workspace with .opencrab/team.json → start
+  //   - workspace without team.json → no sidecar (creating a team starts it,
+  //     see TeamCreateModal)
+  //   - exit Team Mode / switch workspace → stop the previous workspace's sidecar
+  // start_sidecar is idempotent + workspace-aware on the Rust side. This effect
+  // does NOT touch Codex threads — bootstrap is Phase 1.1.B.
+  useEffect(() => {
+    if (!activeWorkspaceId) return;
+    const workspaceId = activeWorkspaceId;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const team = await readTeamConfig(workspaceId);
+        if (cancelled || !team) return;
+        await startSidecar(workspaceId);
+      } catch (err) {
+        console.error("[team-mode] sidecar auto-start failed", err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      void stopSidecar(workspaceId).catch(() => {
+        // No sidecar was running for this workspace (e.g. no team.json) — fine.
+      });
+    };
+  }, [activeWorkspaceId]);
+
   const {
     threadCodexParamsVersion,
     getThreadCodexParams,
@@ -517,6 +552,24 @@ export default function TeamMainApp() {
     threadSortKey: threadListSortKey,
     onThreadCodexMetadataDetected: handleThreadCodexMetadataDetected,
   });
+
+  // Team Mode: resolve the active agent's (Phase 1.1: the PM's) Codex thread id
+  // from the sidecar, point the reused chat stack at it, and hydrate its
+  // history via the normal-mode resume path (Phase 1.3). `activeThreadId` then
+  // *is* the agent thread id — the rest of the normal-mode chat stack
+  // (messages / streaming / history) works unchanged off it.
+  useActiveAgentThreadId(activeWorkspaceId, setActiveThreadId, refreshThread);
+
+  // Team Mode send transport (decision B1): the composer's send is rerouted
+  // from the direct-Codex path to `sidecar_pm_say` so the LangGraph sidecar
+  // sees the user's turn. These drop-in replacements are handed to the composer
+  // workspace-state hook below in place of useThreads' sendUserMessage*.
+  const teamModeMessaging = useTeamModeMessaging({
+    activeWorkspaceId,
+    activeAgentThreadId: activeThreadId,
+    onDebug: addDebugEntry,
+  });
+
   const { connectionState: remoteThreadConnectionState, reconnectLive } =
     useRemoteThreadLiveConnection({
       backendMode: appSettings.backendMode,
@@ -1139,8 +1192,11 @@ export default function TeamMainApp() {
     actions: {
       connectWorkspace,
       startThreadForWorkspace,
-      sendUserMessage,
-      sendUserMessageToThread,
+      // Team Mode (B1): composer send goes through sidecar_pm_say, not the
+      // direct-Codex transport. Other send paths in this file (prompt actions,
+      // etc.) still use useThreads' sendUserMessage* — out of Phase 1.2 scope.
+      sendUserMessage: teamModeMessaging.sendUserMessage,
+      sendUserMessageToThread: teamModeMessaging.sendUserMessageToThread,
       seedThreadCodexParams: patchThreadCodexParams,
       startFork,
       startReview,
@@ -1805,20 +1861,25 @@ export default function TeamMainApp() {
     compactGitBackNode,
   } = useMainAppLayoutNodes(layoutSurfaces);
 
-  // Team Mode override: replace both the no-workspace home and the
-  // per-workspace home with TeamHome. We do NOT touch sidebar / titlebar /
-  // modals / composer — those layout surfaces remain identical to normal
-  // mode so the fork stays visually close while we diverge incrementally.
-  // TeamHome itself decides what to render based on workspaceId.
-  const teamHomeNode = <TeamHome workspaceId={activeWorkspaceId} />;
+  // Team Mode override: TeamHome wraps the reused normal-mode chat. It renders
+  // the team roster strip + the real `messagesNode` (<Messages>) once a team
+  // exists, and the select-workspace / loading / empty states otherwise. The
+  // composer, sidebar, titlebar and modals stay identical to normal mode.
+  const teamHomeNode = (
+    <TeamHome workspaceId={activeWorkspaceId} messagesSlot={messagesNode} />
+  );
   const mainMessagesNode = teamHomeNode;
   // Acknowledge upstream-shape values that team mode no longer renders.
   // Kept in the destructure above so this file's structure stays close to
   // MainApp.tsx for future merges; intentionally unused here.
   void showWorkspaceHome;
   void workspaceHomeNode;
-  void messagesNode;
   void homeNode;
+  // useThreads' direct-Codex `sendUserMessage` is replaced by the Team Mode
+  // (sidecar) transport for the composer; kept in the destructure for
+  // structural parity with MainApp.tsx. `sendUserMessageToThread` is still used
+  // by other (non-composer) send paths in this file.
+  void sendUserMessage;
   const compactThreadConnectionState: "live" | "polling" | "disconnected" =
     !activeWorkspace?.connected
       ? "disconnected"
