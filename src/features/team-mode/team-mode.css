@@ -347,6 +347,48 @@
   border-top: 1px solid var(--border-subtle);
 }
 
+/* ---- Provision-error banner (Phase 2 pivot) -----------------------
+ * Surfaces sidecar startup / `codex_start_thread` failures that would
+ * otherwise sink into DevTools console. Sits between the roster strip
+ * and the messages pane; user can dismiss with × . */
+.team-mode-error-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px 16px;
+  background: rgba(255, 80, 80, 0.12);
+  border-bottom: 1px solid rgba(255, 80, 80, 0.35);
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.5;
+  flex: 0 0 auto;
+}
+.team-mode-error-banner-body {
+  flex: 1 1 auto;
+  word-break: break-word;
+}
+.team-mode-error-banner-body strong {
+  color: #ff8e8e;
+  margin-right: 4px;
+}
+.team-mode-error-banner-hint {
+  opacity: 0.7;
+}
+.team-mode-error-banner-dismiss {
+  flex: 0 0 auto;
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 6px;
+  opacity: 0.6;
+}
+.team-mode-error-banner-dismiss:hover {
+  opacity: 1;
+}
+
 /* ---- Chat layout (Phase 1.2): roster strip + reused <Messages> ----- */
 .team-mode-chat-layout {
   display: flex;
@@ -393,6 +435,25 @@
   border: 1px solid var(--border-subtle);
   border-radius: 999px;
   white-space: nowrap;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+.team-mode-strip-chip:hover {
+  background: var(--surface-control-hover, var(--surface-control));
+}
+.team-mode-strip-chip-active {
+  border-color: var(--accent-primary, currentColor);
+  background: var(--surface-selected, var(--surface-control));
+}
+.team-mode-strip-chip-status {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted, currentColor);
+  opacity: 0.5;
+  margin-left: 2px;
 }
 .team-mode-strip-chip-name {
   font-size: 12px;

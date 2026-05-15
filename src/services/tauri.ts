@@ -1277,31 +1277,22 @@ export async function stopSidecar(workspaceId: string): Promise<void> {
   return invoke<void>("stop_sidecar", { workspaceId });
 }
 
-// PM chat send. Resolves once the turn has been *dispatched* to Codex — it
-// returns `{ codexThreadId, sent }`, NOT the reply. The PM's reply streams
-// asynchronously as `app-server-event`s filtered by `codexThreadId`.
-export type SidecarPmSayResult = {
-  codexThreadId: string;
-  sent: boolean;
+// Phase 2 pivot — user → team entry point goes through normal-mode
+// `send_user_message` (composer's default) directly to the active agent's
+// Codex thread; sidecar is no longer in the user-send path.
+//
+// This kicks the sidecar to (1) provision a Codex thread per agent that
+// doesn't already have one (writing `agents[].threadId` back into team.json),
+// and (2) ask the Tauri host to start its team router (permanent per-thread
+// taps + `<send_message>` tag dispatcher). Idempotent — safe to retry.
+// Frontend calls this once after `start_sidecar` succeeds, then polls
+// `read_team_config` until each agent has a `threadId`.
+export type SidecarProvisionResult = {
+  agents: Array<{ id: string; name: string; threadId: string }>;
 };
 
-export async function sidecarPmSay(
+export async function sidecarProvision(
   workspaceId: string,
-  text: string,
-): Promise<SidecarPmSayResult> {
-  return invoke<SidecarPmSayResult>("sidecar_pm_say", { workspaceId, text });
-}
-
-// Pre-bootstrap the active agent's Codex thread (no message sent). Returns the
-// agent's Codex thread id so the UI can point the chat stack at it on mount.
-export type EnsureAgentThreadResult = {
-  codexThreadId: string;
-};
-
-export async function ensureAgentThread(
-  workspaceId: string,
-): Promise<EnsureAgentThreadResult> {
-  return invoke<EnsureAgentThreadResult>("sidecar_ensure_agent_thread", {
-    workspaceId,
-  });
+): Promise<SidecarProvisionResult> {
+  return invoke<SidecarProvisionResult>("sidecar_provision", { workspaceId });
 }

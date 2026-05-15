@@ -44,6 +44,13 @@ pub(crate) struct SessionRouting {
     /// notifications (commit-message generation, run-metadata, etc.).
     pub(crate) background_thread_callbacks:
         Mutex<HashMap<String, mpsc::UnboundedSender<Value>>>,
+    /// `thread_id → fan-out tap senders`. Phase 2.C: sidecar's blocking
+    /// `codex_send_user_message` registers a tap so it can drain the
+    /// `agentMessage/delta` stream and break on `turn/completed`. Unlike
+    /// `background_thread_callbacks`, taps run **alongside** the UI emit —
+    /// they never suppress notifications from reaching the frontend.
+    pub(crate) tap_thread_callbacks:
+        Mutex<HashMap<String, Vec<mpsc::UnboundedSender<Value>>>>,
 }
 
 impl SessionRouting {
@@ -56,6 +63,7 @@ impl SessionRouting {
             thread_workspace: Mutex::new(HashMap::new()),
             hidden_thread_ids: Mutex::new(HashSet::new()),
             background_thread_callbacks: Mutex::new(HashMap::new()),
+            tap_thread_callbacks: Mutex::new(HashMap::new()),
             owner_workspace_id,
         })
     }
@@ -143,6 +151,40 @@ impl SessionRouting {
             .lock()
             .await
             .remove(thread_id)
+    }
+
+    /// Register a parallel observer (tap) for events on `thread_id`. Multiple
+    /// taps may coexist, and they fire alongside (never instead of) the UI
+    /// emit. Returned handle's `Drop` must call `unregister_tap_callback` —
+    /// callers wrap registration in their own RAII or explicit cleanup.
+    pub(crate) async fn register_tap_callback(
+        &self,
+        thread_id: String,
+        sender: mpsc::UnboundedSender<Value>,
+    ) {
+        self.tap_thread_callbacks
+            .lock()
+            .await
+            .entry(thread_id)
+            .or_insert_with(Vec::new)
+            .push(sender);
+    }
+
+    /// Remove a single tap by sender identity. Compares using
+    /// `UnboundedSender::same_channel` so the caller's local handle is the
+    /// matching key. If the entry's vec is emptied the map slot is dropped.
+    pub(crate) async fn unregister_tap_callback(
+        &self,
+        thread_id: &str,
+        sender: &mpsc::UnboundedSender<Value>,
+    ) {
+        let mut map = self.tap_thread_callbacks.lock().await;
+        if let Some(vec) = map.get_mut(thread_id) {
+            vec.retain(|s| !s.same_channel(sender));
+            if vec.is_empty() {
+                map.remove(thread_id);
+            }
+        }
     }
 }
 

@@ -12,6 +12,11 @@ export type AgentConfig = {
   model: string;
   systemPromptTemplate: string;
   toolsPreset: ToolsPreset;
+  // Phase 2 pivot: bound normal-mode Codex thread id, populated by sidecar
+  // provisioning. Frontend treats `agents[].threadId` as the only source of
+  // truth for "which Codex thread is this agent" — no parallel agent-<id>
+  // LangGraph thread anymore.
+  threadId?: string;
 };
 
 export type Subscription = {

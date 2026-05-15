@@ -9,5 +9,6 @@ pub(crate) mod inbound_ops;
 pub(crate) mod manager;
 pub(crate) mod session;
 pub(crate) mod status;
+pub(crate) mod team_router;
 
 pub(crate) use manager::SidecarSessionManager;

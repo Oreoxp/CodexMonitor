@@ -55,14 +55,23 @@ pub(crate) fn instantiate_template(template_id: &str) -> Result<TeamConfig, Stri
     }
 
     for sub in &mut config.subscriptions {
-        sub.publisher = id_map.get(&sub.publisher).cloned().ok_or_else(|| {
-            format!(
-                "template {template_id}: subscription publisher references unknown agent id {}",
-                sub.publisher
-            )
-        })?;
+        // The literal "user" pseudo-publisher (USER_PUBLISHER) is identity-
+        // stable across template instantiations — only real agent ids get
+        // freshly minted UUIDs. Mirrors sidecar's `instantiateTemplate`.
+        if sub.publisher != crate::team_config::types::USER_PUBLISHER {
+            sub.publisher = id_map.get(&sub.publisher).cloned().ok_or_else(|| {
+                format!(
+                    "template {template_id}: subscription publisher references unknown agent id {}",
+                    sub.publisher
+                )
+            })?;
+        }
         let mut new_subscribers = Vec::with_capacity(sub.subscribers.len());
         for old in &sub.subscribers {
+            if old == crate::team_config::types::USER_PUBLISHER {
+                new_subscribers.push(old.clone());
+                continue;
+            }
             let new_id = id_map.get(old).cloned().ok_or_else(|| {
                 format!(
                     "template {template_id}: subscription subscriber references unknown agent id {old}"

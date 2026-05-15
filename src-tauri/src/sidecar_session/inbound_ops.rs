@@ -1,25 +1,32 @@
 // Reverse-RPC handlers — sidecar → Tauri.
 //
-// Spike B surface area is intentionally narrow: just the three Codex calls
-// `pm_say` needs to drive a Codex thread. Anything else returns an
-// `unknown op` error which the sidecar surfaces as a rejection.
+// Phase 2 pivot surface:
+//   - codex_start_thread: provision an agent's normal-mode Codex thread
+//     (HYBRID developer_instructions). Used at sidecar init for each
+//     team.json agent missing a `threadId`.
+//   - team_router_start: Tauri replaces its workspace-scoped router with
+//     the supplied agent roster + subscription topology, registering
+//     permanent taps and spawning per-thread consumer tasks. The router
+//     parses `<send_message>` tags from each turn's final text and
+//     dispatches them via normal-mode `send_user_message_to_thread`.
 //
-// These handlers run in the stdout reader task. They MUST NOT take long-lived
-// locks beyond what the existing `codex_core::*_core` helpers already do.
+// `codex_resume_thread` and `codex_send_user_message` are gone — sidecar no
+// longer drives turns, so neither op has a caller.
 
 use serde_json::{json, Map, Value};
+use tauri::AppHandle;
 
 use crate::state::AppState;
 
 pub(crate) async fn dispatch_inbound_op(
     state: &AppState,
+    app_handle: &AppHandle,
     op: &str,
     params: &Value,
 ) -> Result<Value, String> {
     match op {
         "codex_start_thread" => handle_codex_start_thread(state, params).await,
-        "codex_resume_thread" => handle_codex_resume_thread(state, params).await,
-        "codex_send_user_message" => handle_codex_send_user_message(state, params).await,
+        "team_router_start" => handle_team_router_start(state, app_handle, params).await,
         other => Err(format!("unknown op: {}", other)),
     }
 }
@@ -41,11 +48,9 @@ async fn handle_codex_start_thread(state: &AppState, params: &Value) -> Result<V
     let developer_instructions = optional_str(params, "developer_instructions");
 
     // HYBRID injection — see docs/architecture/opencrab-3.0-prompt-strategy.md.
-    // The PM role is passed as `developerInstructions`; `baseInstructions` is
-    // deliberately left unset so Codex keeps its default coding-agent prompt
-    // and safety guardrails. The `thread/start` params are built inline here
-    // (rather than via `start_thread_core`) so the normal-mode thread/start
-    // path stays byte-identical — `start_thread_core` has other callers.
+    // The agent role + comm guide is passed as `developerInstructions`;
+    // `baseInstructions` is deliberately left unset so Codex keeps its default
+    // coding-agent prompt and safety guardrails.
     let session =
         crate::shared::codex_core::get_session_clone(&state.sessions, &workspace_id).await?;
     let workspace_path = crate::shared::codex_core::resolve_workspace_path_core(
@@ -67,8 +72,6 @@ async fn handle_codex_start_thread(state: &AppState, params: &Value) -> Result<V
         )
         .await?;
 
-    // Normalize: hand the sidecar a top-level `threadId` even if Codex nested
-    // it (varies by upstream version). Keep the original payload too for debug.
     let thread_id = extract_thread_id(&raw);
     Ok(json!({
         "threadId": thread_id,
@@ -76,74 +79,27 @@ async fn handle_codex_start_thread(state: &AppState, params: &Value) -> Result<V
     }))
 }
 
-async fn handle_codex_resume_thread(state: &AppState, params: &Value) -> Result<Value, String> {
-    // Resume Discipline — see docs/architecture/opencrab-3.0-prompt-strategy.md.
-    // `thread/resume` must NEVER carry prompt-shaping fields: passing one
-    // silently overrides the frozen system prompt and busts the prefix cache
-    // (Codex accepts it with no error/warning). The sidecar's
-    // `CodexResumeThreadReq` type omits these fields by construction; this
-    // runtime guard backstops any other path that could reach here.
-    for forbidden in [
-        "base_instructions",
-        "baseInstructions",
-        "instructions",
-        "developer_instructions",
-        "developerInstructions",
-    ] {
-        if params.get(forbidden).is_some() {
-            return Err(format!(
-                "codex_resume_thread rejected: `{forbidden}` is a prompt-shaping \
-                 field forbidden on resume (see prompt-strategy.md, Resume Discipline)"
-            ));
-        }
-    }
-
-    let workspace_id = required_str(params, "workspace_id")?;
-    let thread_id = required_str(params, "thread_id")?;
-    let raw = crate::shared::codex_core::resume_thread_core(
-        &state.sessions,
-        workspace_id,
-        thread_id.clone(),
-    )
-    .await?;
-    Ok(json!({ "threadId": thread_id, "raw": raw }))
-}
-
-async fn handle_codex_send_user_message(
+async fn handle_team_router_start(
     state: &AppState,
+    app_handle: &AppHandle,
     params: &Value,
 ) -> Result<Value, String> {
     let workspace_id = required_str(params, "workspace_id")?;
-    let thread_id = required_str(params, "thread_id")?;
-    let text = required_str(params, "text")?;
-    // Spike defaults: no model override, no effort/service-tier, no images or
-    // mentions, no collaboration mode. access_mode=None falls through to
-    // `current` which gives workspaceWrite + network + on-request approvals.
-    let raw = crate::shared::codex_core::send_user_message_core(
-        &state.sessions,
-        &state.workspaces,
-        workspace_id,
-        thread_id,
-        text,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
-    .await?;
-    Ok(json!({ "raw": raw }))
+    let agents: Vec<crate::sidecar_session::team_router::AgentInfo> =
+        serde_json::from_value(params.get("agents").cloned().unwrap_or(Value::Null))
+            .map_err(|e| format!("invalid `agents`: {}", e))?;
+    let subscriptions: Vec<crate::sidecar_session::team_router::Subscription> =
+        serde_json::from_value(params.get("subscriptions").cloned().unwrap_or(Value::Null))
+            .map_err(|e| format!("invalid `subscriptions`: {}", e))?;
+
+    state
+        .team_routers
+        .start(app_handle.clone(), workspace_id, agents, subscriptions)
+        .await?;
+    Ok(json!({ "ok": true }))
 }
 
 fn extract_thread_id(value: &Value) -> Option<String> {
-    // `send_request_for_workspace` returns the full JSON-RPC envelope, so the
-    // real payload lives under `result.…`. Probe both with and without the
-    // `result` unwrap in case a caller hands us pre-unwrapped data.
-    // Codex's `thread/start` response shape (as of 2026-05-14): the thread id
-    // is at `result.thread.id` (with `result.thread.sessionId` as same-value
-    // fallback). Older shapes used flat `threadId` / `thread_id` keys.
     let candidates: &[&[&str]] = &[
         &["result", "thread", "id"],
         &["result", "thread", "sessionId"],
@@ -155,8 +111,6 @@ fn extract_thread_id(value: &Value) -> Option<String> {
         &["thread", "thread_id"],
         &["result", "threadId"],
         &["result", "thread_id"],
-        &["turn", "threadId"],
-        &["turn", "thread_id"],
     ];
     for path in candidates {
         let mut cur = value;

@@ -47,6 +47,10 @@ pub(crate) struct AppState {
     pub(crate) session_manager: Arc<CodexSessionManager<TauriEventSink, TauriEventSink>>,
     /// Phase 1 Spike A: one sidecar (`npx tsx sidecar/src/main.ts`) per workspace.
     pub(crate) sidecar_sessions: Arc<SidecarSessionManager>,
+    /// Phase 2 pivot: per-workspace team router (permanent taps + tag dispatch
+    /// consumer tasks for inter-agent `<send_message>` routing). Replaced
+    /// wholesale on each `team_router_start` reverse-RPC from the sidecar.
+    pub(crate) team_routers: Arc<crate::sidecar_session::team_router::TeamRouters>,
     pub(crate) terminal_sessions: Mutex<HashMap<String, Arc<crate::terminal::TerminalSession>>>,
     pub(crate) remote_backend: Mutex<Option<crate::remote_backend::RemoteBackend>>,
     pub(crate) storage_path: PathBuf,
@@ -78,6 +82,7 @@ impl AppState {
             sessions: Mutex::new(HashMap::new()),
             session_manager,
             sidecar_sessions: Arc::new(SidecarSessionManager::new()),
+            team_routers: Arc::new(crate::sidecar_session::team_router::TeamRouters::new()),
             terminal_sessions: Mutex::new(HashMap::new()),
             remote_backend: Mutex::new(None),
             storage_path,

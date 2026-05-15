@@ -1,7 +1,6 @@
 import { lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { TeamHome } from "./TeamHome";
-import { useActiveAgentThreadId } from "../hooks/useActiveAgentThreadId";
-import { useTeamModeMessaging } from "../hooks/useTeamModeMessaging";
+import { useActiveTeamAgent } from "../hooks/useActiveTeamAgent";
 import successSoundUrl from "@/assets/success-notification.mp3";
 import errorSoundUrl from "@/assets/error-notification.mp3";
 import { MainAppShell } from "@app/components/MainAppShell";
@@ -83,7 +82,12 @@ import {
 import { useAppShellOrchestration } from "@app/orchestration/useLayoutOrchestration";
 import { normalizeCodexArgsInput } from "@/utils/codexArgsInput";
 import { subscribeTrayOpenThread } from "@services/events";
-import { readTeamConfig, startSidecar, stopSidecar } from "@services/tauri";
+import {
+  readTeamConfig,
+  sidecarProvision,
+  startSidecar,
+  stopSidecar,
+} from "@services/tauri";
 
 const SettingsView = lazy(() =>
   import("@settings/components/SettingsView").then((module) => ({
@@ -193,27 +197,54 @@ export default function TeamMainApp() {
     [workspaces],
   );
 
+  // Bumped by TeamHome whenever the user creates a team via the empty-state
+  // modal. Drives the sidecar lifecycle effect to re-run so it can pick up
+  // the freshly-written team.json (without this, entering Team Mode for a
+  // workspace with no team meant the effect ran once, found no team, and
+  // never tried again — the composer stayed hidden behind workspace-home).
+  const [teamReadyVersion, setTeamReadyVersion] = useState(0);
+  const handleTeamCreated = useCallback(() => {
+    setTeamReadyVersion((v) => v + 1);
+  }, []);
+  // Phase 2 pivot — surface sidecar-startup / provision failures as a UI
+  // banner so they don't sink into DevTools console. Cleared when the
+  // workspace switches or on retry (teamReadyVersion bump).
+  const [provisionError, setProvisionError] = useState<string | null>(null);
+  const dismissProvisionError = useCallback(() => setProvisionError(null), []);
+
   // Sidecar lifecycle: the LangGraph sidecar follows Team Mode and the active
   // workspace. TeamMainApp is mounted exactly while mode === "team" (App.tsx),
-  // so this effect's mount/cleanup cover enter/exit Team Mode, and the
-  // activeWorkspaceId dependency covers workspace switches:
+  // so this effect's mount/cleanup cover enter/exit Team Mode, the
+  // activeWorkspaceId dependency covers workspace switches, and
+  // teamReadyVersion covers in-session team creation:
   //   - enter Team Mode / switch to a workspace with .opencrab/team.json → start
-  //   - workspace without team.json → no sidecar (creating a team starts it,
-  //     see TeamCreateModal)
+  //   - workspace without team.json → no sidecar; create a team via the modal
+  //     → teamReadyVersion bumps → effect re-runs → start
   //   - exit Team Mode / switch workspace → stop the previous workspace's sidecar
-  // start_sidecar is idempotent + workspace-aware on the Rust side. This effect
-  // does NOT touch Codex threads — bootstrap is Phase 1.1.B.
+  // start_sidecar is idempotent + workspace-aware on the Rust side.
   useEffect(() => {
     if (!activeWorkspaceId) return;
     const workspaceId = activeWorkspaceId;
     let cancelled = false;
+    setProvisionError(null);
     void (async () => {
       try {
         const team = await readTeamConfig(workspaceId);
         if (cancelled || !team) return;
         await startSidecar(workspaceId);
+        if (cancelled) return;
+        // Phase 2 pivot: after the sidecar is up, ask it to provision any
+        // agent missing a `threadId` (writes them back into team.json) and
+        // start the Tauri-side team router. The sidecar retries internally
+        // for the `connect_workspace` race (`workspace not connected`); any
+        // error reaching this catch is a real failure worth surfacing.
+        await sidecarProvision(workspaceId);
       } catch (err) {
-        console.error("[team-mode] sidecar auto-start failed", err);
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error("[team-mode] sidecar auto-start / provision failed", err);
+        if (!cancelled) {
+          setProvisionError(msg);
+        }
       }
     })();
     return () => {
@@ -222,7 +253,7 @@ export default function TeamMainApp() {
         // No sidecar was running for this workspace (e.g. no team.json) — fine.
       });
     };
-  }, [activeWorkspaceId]);
+  }, [activeWorkspaceId, teamReadyVersion]);
 
   const {
     threadCodexParamsVersion,
@@ -558,17 +589,16 @@ export default function TeamMainApp() {
   // history via the normal-mode resume path (Phase 1.3). `activeThreadId` then
   // *is* the agent thread id — the rest of the normal-mode chat stack
   // (messages / streaming / history) works unchanged off it.
-  useActiveAgentThreadId(activeWorkspaceId, setActiveThreadId, refreshThread);
-
-  // Team Mode send transport (decision B1): the composer's send is rerouted
-  // from the direct-Codex path to `sidecar_pm_say` so the LangGraph sidecar
-  // sees the user's turn. These drop-in replacements are handed to the composer
-  // workspace-state hook below in place of useThreads' sendUserMessage*.
-  const teamModeMessaging = useTeamModeMessaging({
+  const { activeAgentId, selectAgent } = useActiveTeamAgent(
     activeWorkspaceId,
-    activeAgentThreadId: activeThreadId,
-    onDebug: addDebugEntry,
-  });
+    setActiveThreadId,
+    teamReadyVersion,
+  );
+
+  // Phase 2 pivot: composer goes through normal-mode `useThreads.sendUserMessage`
+  // directly to the active agent's Codex thread (each agent IS a normal-mode
+  // thread, provisioned by the sidecar). No team-mode wrapper around send;
+  // the sidecar is only in the inter-agent `<send_message>` routing path.
 
   const { connectionState: remoteThreadConnectionState, reconnectLive } =
     useRemoteThreadLiveConnection({
@@ -1192,11 +1222,11 @@ export default function TeamMainApp() {
     actions: {
       connectWorkspace,
       startThreadForWorkspace,
-      // Team Mode (B1): composer send goes through sidecar_pm_say, not the
-      // direct-Codex transport. Other send paths in this file (prompt actions,
-      // etc.) still use useThreads' sendUserMessage* — out of Phase 1.2 scope.
-      sendUserMessage: teamModeMessaging.sendUserMessage,
-      sendUserMessageToThread: teamModeMessaging.sendUserMessageToThread,
+      // Phase 2 pivot: pass useThreads' default send paths through unchanged
+      // — the active thread IS the team agent's Codex thread, so normal-mode
+      // send works without any team-mode wrapping.
+      sendUserMessage,
+      sendUserMessageToThread,
       seedThreadCodexParams: patchThreadCodexParams,
       startFork,
       startReview,
@@ -1866,7 +1896,15 @@ export default function TeamMainApp() {
   // exists, and the select-workspace / loading / empty states otherwise. The
   // composer, sidebar, titlebar and modals stay identical to normal mode.
   const teamHomeNode = (
-    <TeamHome workspaceId={activeWorkspaceId} messagesSlot={messagesNode} />
+    <TeamHome
+      workspaceId={activeWorkspaceId}
+      messagesSlot={messagesNode}
+      activeAgentId={activeAgentId}
+      onSelectAgent={selectAgent}
+      onTeamCreated={handleTeamCreated}
+      provisionError={provisionError}
+      onDismissProvisionError={dismissProvisionError}
+    />
   );
   const mainMessagesNode = teamHomeNode;
   // Acknowledge upstream-shape values that team mode no longer renders.
@@ -1875,11 +1913,9 @@ export default function TeamMainApp() {
   void showWorkspaceHome;
   void workspaceHomeNode;
   void homeNode;
-  // useThreads' direct-Codex `sendUserMessage` is replaced by the Team Mode
-  // (sidecar) transport for the composer; kept in the destructure for
-  // structural parity with MainApp.tsx. `sendUserMessageToThread` is still used
-  // by other (non-composer) send paths in this file.
-  void sendUserMessage;
+  // Phase 2 pivot: `sendUserMessage` and `sendUserMessageToThread` flow
+  // through to useComposerController.actions unchanged (above) — composer
+  // sends straight to the active agent's normal-mode Codex thread.
   const compactThreadConnectionState: "live" | "polling" | "disconnected" =
     !activeWorkspace?.connected
       ? "disconnected"

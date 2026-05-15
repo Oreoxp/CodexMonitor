@@ -466,6 +466,23 @@ async fn dispatch_notification<E: EventSink>(
         }
     }
 
+    // Phase 2.C — fan out to per-thread taps. Unlike background callbacks,
+    // taps NEVER suppress the UI emit; they're parallel observers. The
+    // sidecar uses one to drain a thread's `agentMessage/delta` stream until
+    // `turn/completed` while the UI keeps streaming the same events.
+    if let Some(ref tid) = thread_id {
+        let taps = routing
+            .tap_thread_callbacks
+            .lock()
+            .await
+            .get(tid)
+            .cloned()
+            .unwrap_or_default();
+        for tx in &taps {
+            let _ = tx.send(value.clone());
+        }
+    }
+
     if !sent_to_background {
         if should_broadcast_global_workspace_notification(method_name, thread_id.as_ref(), None) {
             let workspace_ids = routing.workspace_ids_snapshot().await;

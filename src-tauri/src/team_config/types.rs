@@ -13,6 +13,11 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The literal pseudo-publisher representing the human user in the topology.
+/// Mirrors `USER_PUBLISHER` in `sidecar/src/team/types.ts`. Subscriptions may
+/// use it as `publisher` or as a `subscribers` entry; it is never an agent id.
+pub(crate) const USER_PUBLISHER: &str = "user";
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum ToolsPreset {
@@ -30,6 +35,11 @@ pub(crate) struct AgentConfig {
     pub(crate) model: String,
     pub(crate) system_prompt_template: String,
     pub(crate) tools_preset: ToolsPreset,
+    /// Phase 2 pivot: bound normal-mode Codex thread id. Optional because
+    /// templates and freshly-created teams omit it; sidecar provisions and
+    /// writes it back at init.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub(crate) thread_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

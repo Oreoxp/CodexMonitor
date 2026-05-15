@@ -177,7 +177,8 @@ impl SidecarSession {
                             tokio::spawn(async move {
                                 let state = app_handle.state::<AppState>();
                                 let result =
-                                    dispatch_inbound_op(state.inner(), &op, &params).await;
+                                    dispatch_inbound_op(state.inner(), &app_handle, &op, &params)
+                                        .await;
                                 let frame = match result {
                                     Ok(data) => json!({
                                         "type": "res",
