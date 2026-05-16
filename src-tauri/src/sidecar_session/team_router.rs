@@ -179,11 +179,70 @@ fn spawn_consumer(
                     }
                 }
                 "turn/completed" => {
-                    let final_text = std::mem::take(&mut buf);
-                    process_final_text(&shared, &thread_id, &final_text).await;
+                    // Codex emits `turn/completed` for failed turns too — the
+                    // failure surfaces as `params.turn.status == "failed"`
+                    // and/or non-null `params.turn.error`. Detect that here
+                    // and log a grep-friendly stderr line so any future turn
+                    // failure (kickoff or routed dispatch) leaves a trace,
+                    // then discard the buffer instead of routing partial text.
+                    let turn = event.get("params").and_then(|p| p.get("turn"));
+                    let status = turn
+                        .and_then(|t| t.get("status"))
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("");
+                    let error = turn.and_then(|t| t.get("error"));
+                    let has_error = error.map(|e| !e.is_null()).unwrap_or(false);
+                    if status == "failed" || has_error {
+                        eprintln!(
+                            "[team_router] thread={} turn failed: status={} error={}",
+                            thread_id,
+                            status,
+                            error
+                                .map(|e| e.to_string())
+                                .unwrap_or_else(|| "null".to_string())
+                        );
+                        buf.clear();
+                    } else {
+                        let final_text = std::mem::take(&mut buf);
+                        process_final_text(&shared, &thread_id, &final_text).await;
+                    }
+                }
+                "error" => {
+                    // ErrorNotification (v2): wraps `TurnError` with a
+                    // `willRetry` flag. `will_retry: true` is an intermediate
+                    // retry-able stream error; `false` is terminal. Log both
+                    // so silent "model returned nothing" patterns get caught
+                    // in real time. See app-server-protocol/v2/notification.rs
+                    // (`ErrorNotification`).
+                    let params = event.get("params");
+                    let will_retry = params
+                        .and_then(|p| p.get("willRetry"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let err_payload = params
+                        .and_then(|p| p.get("error"))
+                        .map(|e| e.to_string())
+                        .unwrap_or_else(|| "(no error payload)".to_string());
+                    eprintln!(
+                        "[team_router] thread={} turn error: will_retry={} error={}",
+                        thread_id, will_retry, err_payload
+                    );
+                    if !will_retry {
+                        buf.clear();
+                    }
                 }
                 "turn/error" => {
-                    // Discard accumulated text; nothing to route on a failed turn.
+                    // Legacy: Codex's current wire-format calls this `error`
+                    // (handled above), not `turn/error`. Keep this arm so any
+                    // upstream rename / split still surfaces in logs.
+                    let payload = event
+                        .get("params")
+                        .map(|p| p.to_string())
+                        .unwrap_or_else(|| "(no params)".to_string());
+                    eprintln!(
+                        "[team_router] thread={} legacy turn/error: {}",
+                        thread_id, payload
+                    );
                     buf.clear();
                 }
                 _ => {}

@@ -9,12 +9,26 @@
 //   2. resolves the user-correspondent agent (the subscriber of the
 //      `{ publisher: "user" }` subscription, fallback `agents[0]`)
 //   3. on mount / `teamReadyVersion` change, points the normal-mode chat at
-//      the user correspondent's Codex thread via `setActiveThreadId`
+//      the user correspondent's Codex thread via `setActiveThreadId` ONCE,
+//      guarded by `initialActivationDoneRef` so that any later effect re-run
+//      (which shouldn't happen with our deps list, but belt-and-suspenders)
+//      cannot snap the user's chip selection back to the correspondent
 //   4. exposes `selectAgent(agentId)` for chip clicks — re-points the chat
 //      at the named agent's Codex thread
 //
 // Send / hydration / streaming all go through normal-mode `useThreads`
 // unchanged; this hook only twiddles `activeThreadId`.
+//
+// IMPORTANT — why `setActiveThreadId` is in a ref and NOT in deps:
+// `useThreads.setActiveThreadId` is built with `useCallback` whose deps
+// include `state.activeThreadIdByWorkspace`. Every active-thread switch
+// (chip click, sidecar repoint, etc.) rebuilds that callback. If we listed
+// `setActiveThreadId` in the polling effect's deps, the chip click would
+// rebuild the callback → effect re-fires → poller wakes up → calls
+// `setActiveThreadId(correspondent.threadId, ws)` and clobbers the user's
+// chip selection. Symptom: chip click looks like a no-op (briefly switches
+// to the clicked Dev, then snaps back to PM). We mirror the latest setter
+// into a ref so the effect can read it without subscribing.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { readTeamConfig } from "@services/tauri";
@@ -57,12 +71,31 @@ export function useActiveTeamAgent(
   const workspaceIdRef = useRef<string | null>(workspaceId);
   workspaceIdRef.current = workspaceId;
 
+  // Always-fresh mirror of `setActiveThreadId`; read via `.current` from the
+  // polling effect / selectAgent so neither has to list the prop in deps.
+  // Updated on every render (no deps array) so it lags by at most one render.
+  const setActiveThreadIdRef = useRef(setActiveThreadId);
+  useEffect(() => {
+    setActiveThreadIdRef.current = setActiveThreadId;
+  });
+
+  // Once-per-(workspaceId, teamReadyVersion) latch. Reset at the top of each
+  // effect run; flipped to `true` immediately after the correspondent is
+  // activated. If the polling effect ever re-fires within the same
+  // (workspaceId, teamReadyVersion) generation, the latch short-circuits the
+  // automatic activation so the user's chip selection sticks.
+  const initialActivationDoneRef = useRef(false);
+
   useEffect(() => {
     if (!workspaceId) {
       setActiveAgentId(null);
       teamRef.current = null;
+      initialActivationDoneRef.current = false;
       return;
     }
+    // New (workspaceId, teamReadyVersion) generation: re-allow exactly one
+    // automatic activation. selectAgent is unaffected by this latch.
+    initialActivationDoneRef.current = false;
     let cancelled = false;
     void (async () => {
       // Wait for sidecar provisioning to finish writing threadIds into
@@ -86,8 +119,11 @@ export function useActiveTeamAgent(
           const userAgentId = resolveUserCorrespondentId(team);
           const userAgent = team.agents.find((a) => a.id === userAgentId);
           if (!userAgent || !userAgent.threadId) return;
-          setActiveAgentId(userAgent.id);
-          setActiveThreadId(userAgent.threadId, workspaceId);
+          if (!initialActivationDoneRef.current) {
+            setActiveAgentId(userAgent.id);
+            setActiveThreadIdRef.current(userAgent.threadId, workspaceId);
+            initialActivationDoneRef.current = true;
+          }
           return;
         } catch (err) {
           if (attempt === POLL_ATTEMPTS - 1) {
@@ -101,25 +137,24 @@ export function useActiveTeamAgent(
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, setActiveThreadId, teamReadyVersion]);
+  }, [workspaceId, teamReadyVersion]);
 
-  const selectAgent = useCallback(
-    (agentId: string) => {
-      const wsId = workspaceIdRef.current;
-      const team = teamRef.current;
-      if (!wsId || !team) return;
-      const target = team.agents.find((a) => a.id === agentId);
-      if (!target || !target.threadId) {
-        console.warn(
-          `[team-mode] selectAgent: agent ${agentId} has no bound threadId yet`,
-        );
-        return;
-      }
-      setActiveAgentId(agentId);
-      setActiveThreadId(target.threadId, wsId);
-    },
-    [setActiveThreadId],
-  );
+  // Stable callback (empty deps) — reads workspaceId / team / setter through
+  // refs, so chip clicks never invalidate downstream callbacks that bind us.
+  const selectAgent = useCallback((agentId: string) => {
+    const wsId = workspaceIdRef.current;
+    const team = teamRef.current;
+    if (!wsId || !team) return;
+    const target = team.agents.find((a) => a.id === agentId);
+    if (!target || !target.threadId) {
+      console.warn(
+        `[team-mode] selectAgent: agent ${agentId} has no bound threadId yet`,
+      );
+      return;
+    }
+    setActiveAgentId(agentId);
+    setActiveThreadIdRef.current(target.threadId, wsId);
+  }, []);
 
   return { activeAgentId, selectAgent };
 }
