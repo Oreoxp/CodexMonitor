@@ -3,6 +3,9 @@ import { readTeamConfig } from "../../../services/tauri";
 import type { TeamConfig } from "../types";
 import { TeamEmptyState } from "./TeamEmptyState";
 import { TeamMemberStrip } from "./TeamMemberStrip";
+import { PlanReviewModal } from "./PlanReviewModal";
+import { PlanReviewBadge } from "./PlanReviewBadge";
+import { useTaskApprovalQueue } from "../hooks/useTaskApprovalQueue";
 
 type TeamHomeProps = {
   workspaceId: string | null;
@@ -110,12 +113,72 @@ export function TeamHome({
   // Team exists: thin agent roster strip on top, the reused normal-mode chat
   // body (messages + streaming + history, all driven by activeThreadId) below.
   return (
+    <TeamHomeReady
+      workspaceId={workspaceId}
+      team={team}
+      activeAgentId={activeAgentId}
+      onSelectAgent={onSelectAgent}
+      messagesSlot={messagesSlot}
+      provisionError={provisionError}
+      onDismissProvisionError={onDismissProvisionError}
+    />
+  );
+}
+
+// Split out so we can call hooks (useTaskApprovalQueue) under the guard that
+// `team` is non-null. Without this split, the hook order in the outer
+// `TeamHome` would change between renders (team === undefined / null vs.
+// team-loaded), violating React's rules-of-hooks.
+type TeamHomeReadyProps = {
+  workspaceId: string;
+  team: TeamConfig;
+  activeAgentId: string | null;
+  onSelectAgent: (agentId: string) => void | Promise<void>;
+  messagesSlot: ReactNode;
+  provisionError?: string | null;
+  onDismissProvisionError?: () => void;
+};
+
+function TeamHomeReady({
+  workspaceId,
+  team,
+  activeAgentId,
+  onSelectAgent,
+  messagesSlot,
+  provisionError,
+  onDismissProvisionError,
+}: TeamHomeReadyProps) {
+  const approval = useTaskApprovalQueue({
+    workspaceId,
+    teamId: team.id,
+    autoCloseOnEmpty: true,
+  });
+
+  return (
     <div className="team-mode-chat-layout">
       <TeamMemberStrip
         team={team}
         activeAgentId={activeAgentId}
         onSelectAgent={onSelectAgent}
+        rightSlot={
+          <PlanReviewBadge
+            queue={approval.queue}
+            onOpen={() => approval.open({ refreshOnOpen: true })}
+          />
+        }
       />
+      {approval.isOpen ? (
+        <PlanReviewModal
+          workspaceId={workspaceId}
+          teamId={team.id}
+          agents={team.agents}
+          queue={approval.queue}
+          onTaskResolved={approval.remove}
+          onTaskPatched={approval.patchInPlace}
+          onRefresh={approval.refetch}
+          onClose={approval.close}
+        />
+      ) : null}
       {provisionError ? (
         <div className="team-mode-error-banner" role="alert">
           <div className="team-mode-error-banner-body">

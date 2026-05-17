@@ -128,6 +128,21 @@ const langGraphEventHub = createEventHub<LangGraphEventPayload>(
   "opencrab://langgraph-event",
 );
 
+// Phase 3 Step 2 emit site — see CodexMonitor/src-tauri/src/sidecar_session/
+// team_router.rs (TasksProposedEvent). Step 4 subscribes here to auto-open
+// the plan-review modal. Event name pinned in the Rust constant
+// `tasks_proposed_event::NAME`; do not rename.
+import type { TasksProposedEvent } from "@/features/team-mode/types/tasks";
+
+const tasksProposedHub = createEventHub<TasksProposedEvent>("tasks-proposed");
+
+export function subscribeTasksProposed(
+  onEvent: (event: TasksProposedEvent) => void,
+  options?: SubscriptionOptions,
+): Unsubscribe {
+  return tasksProposedHub.subscribe(onEvent, options);
+}
+
 export function subscribeAppServerEvents(
   onEvent: (event: AppServerEvent) => void,
   options?: SubscriptionOptions,

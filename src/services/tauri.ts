@@ -1296,3 +1296,63 @@ export async function sidecarProvision(
 ): Promise<SidecarProvisionResult> {
   return invoke<SidecarProvisionResult>("sidecar_provision", { workspaceId });
 }
+
+// ---------------------------------------------------------------------------
+// Phase 3 Step 4 — task store + approval gate bindings.
+//
+// Wire shapes live in features/team-mode/types/tasks.ts. The Rust side
+// emits camelCase via `serde(rename_all = "camelCase")`.
+// ---------------------------------------------------------------------------
+
+import type {
+  ApprovalResult,
+  Task,
+  TaskPatch,
+  TaskStatus,
+} from "@/features/team-mode/types/tasks";
+
+export async function listTasks(
+  workspaceId: string,
+  teamId: string,
+  statusFilter?: TaskStatus[],
+): Promise<Task[]> {
+  return invoke<Task[]>("list_tasks", { workspaceId, teamId, statusFilter });
+}
+
+export async function getTask(
+  workspaceId: string,
+  taskId: string,
+): Promise<Task | null> {
+  return invoke<Task | null>("get_task", { workspaceId, taskId });
+}
+
+export async function approveTask(
+  workspaceId: string,
+  taskId: string,
+  actor: string,
+): Promise<ApprovalResult> {
+  return invoke<ApprovalResult>("approve_task", { workspaceId, taskId, actor });
+}
+
+export async function rejectTask(
+  workspaceId: string,
+  taskId: string,
+  feedback: string | null,
+  actor: string,
+): Promise<ApprovalResult> {
+  return invoke<ApprovalResult>("reject_task", {
+    workspaceId,
+    taskId,
+    feedback,
+    actor,
+  });
+}
+
+export async function updateTask(
+  workspaceId: string,
+  taskId: string,
+  patch: TaskPatch,
+  actor: string,
+): Promise<Task> {
+  return invoke<Task>("update_task", { workspaceId, taskId, patch, actor });
+}

@@ -465,3 +465,180 @@
   letter-spacing: 0.05em;
   opacity: 0.55;
 }
+
+/* -- Phase 3 Step 4: plan-review modal -------------------------------- */
+
+.team-mode-plan-review-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 480px;
+  max-width: 640px;
+  max-height: 80vh;
+}
+.team-mode-plan-review-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 4px 0;
+}
+.team-mode-plan-review-header h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+.team-mode-plan-review-subtitle {
+  margin: 0;
+  opacity: 0.7;
+  font-size: 12px;
+}
+.team-mode-plan-review-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  max-height: 60vh;
+}
+.team-mode-plan-review-card-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.team-mode-plan-review-list .team-mode-plan-review-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  background: var(--surface-control, transparent);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  min-width: 0;
+  max-width: none;
+  max-height: none;
+}
+.team-mode-plan-review-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.65;
+}
+.team-mode-plan-review-input,
+.team-mode-plan-review-textarea,
+.team-mode-plan-review-select {
+  font: inherit;
+  color: inherit;
+  background: var(--surface-input, transparent);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 6px 8px;
+}
+.team-mode-plan-review-textarea {
+  resize: vertical;
+  min-height: 56px;
+  font-family: inherit;
+}
+.team-mode-plan-review-card-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+.team-mode-button-primary {
+  background: var(--accent-primary, currentColor);
+  color: var(--accent-primary-text, white);
+  border-color: transparent;
+}
+.team-mode-button-danger {
+  border-color: var(--danger-fg, currentColor);
+  color: var(--danger-fg, currentColor);
+}
+.team-mode-plan-review-error {
+  font-size: 12px;
+  color: var(--danger-fg, #c00);
+  padding: 6px 8px;
+  background: var(--danger-bg, transparent);
+  border-radius: 4px;
+}
+.team-mode-plan-review-warning-chip {
+  display: inline-block;
+  font-size: 11px;
+  padding: 4px 8px;
+  background: var(--warning-bg, rgba(255, 200, 0, 0.18));
+  color: var(--warning-fg, currentColor);
+  border-radius: 999px;
+}
+.team-mode-plan-review-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 4px 0;
+}
+
+/* -- Phase 3 Step 4: pending-approvals badge in toolbar --------------- */
+
+.team-mode-approval-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--accent-primary, currentColor);
+  background: var(--accent-primary-soft, var(--surface-control));
+  color: var(--accent-primary, currentColor);
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.team-mode-approval-badge:hover {
+  background: var(--surface-control-hover, var(--surface-control));
+}
+.team-mode-approval-badge[disabled],
+.team-mode-approval-badge:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+.team-mode-approval-badge-count {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Right-edge slot in the strip (Phase 3 Step 4: plan-review badge). */
+.team-mode-strip-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+}
+
+/* Step 4 polish: resolved-with-warning card state. */
+.team-mode-plan-review-card-resolved-warning {
+  opacity: 0.78;
+  background: var(--surface-warning-soft, var(--surface-control, transparent));
+  border-color: var(--warning-fg, var(--border-subtle)) !important;
+}
+.team-mode-plan-review-card-resolved-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+.team-mode-plan-review-card-resolved-footer .team-mode-plan-review-warning-chip {
+  flex: 1 1 auto;
+}
+
+/* Step 4 polish: classified error block + Refresh affordance. */
+.team-mode-plan-review-error {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.team-mode-plan-review-error-message {
+  font-size: 12px;
+  color: var(--danger-fg, #c00);
+}
+.team-mode-plan-review-error-actions {
+  display: flex;
+  gap: 6px;
+}

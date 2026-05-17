@@ -1,3 +1,5 @@
+import type { ReactNode } from "react";
+
 import type { TeamConfig } from "../types";
 
 type TeamMemberStripProps = {
@@ -10,6 +12,10 @@ type TeamMemberStripProps = {
   // processing indicator post-Phase-2.
   activeAgentId: string | null;
   onSelectAgent: (agentId: string) => void;
+  // Phase 3 Step 4: optional slot at the right edge of the strip for the
+  // "Plan review (N)" badge. Keeps the strip the layout owner; consumers
+  // (TeamHome) decide what lives there.
+  rightSlot?: ReactNode;
 };
 
 // Thin horizontal roster strip above the chat. One chip per `team.agents[]`.
@@ -18,6 +24,7 @@ export function TeamMemberStrip({
   team,
   activeAgentId,
   onSelectAgent,
+  rightSlot,
 }: TeamMemberStripProps) {
   return (
     <div className="team-mode-strip">
@@ -45,6 +52,7 @@ export function TeamMemberStrip({
           );
         })}
       </div>
+      {rightSlot ? <div className="team-mode-strip-right">{rightSlot}</div> : null}
     </div>
   );
 }
