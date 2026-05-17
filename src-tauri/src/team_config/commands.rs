@@ -41,10 +41,7 @@ pub(crate) async fn list_templates() -> Result<Vec<TemplateInfo>, String> {
 const OPENCRAB_DIR: &str = ".opencrab";
 const TEAM_FILE: &str = "team.json";
 
-async fn workspace_root(
-    state: &AppState,
-    workspace_id: &str,
-) -> Result<PathBuf, String> {
+async fn workspace_root(state: &AppState, workspace_id: &str) -> Result<PathBuf, String> {
     let workspaces = state.workspaces.lock().await;
     let entry = workspaces
         .get(workspace_id)
@@ -54,9 +51,7 @@ async fn workspace_root(
 
 /// Read `<workspace_root>/.opencrab/team.json` if present. Pure function —
 /// touches the filesystem only via std::fs.
-pub(crate) fn read_team_at_path(
-    workspace_root: &Path,
-) -> Result<Option<TeamConfig>, String> {
+pub(crate) fn read_team_at_path(workspace_root: &Path) -> Result<Option<TeamConfig>, String> {
     let team_json = workspace_root.join(OPENCRAB_DIR).join(TEAM_FILE);
     if !team_json.exists() {
         return Ok(None);
@@ -150,10 +145,7 @@ mod tests {
         assert!(err.contains("team already exists"), "got: {err}");
 
         // The pre-existing team.json must NOT have been clobbered.
-        let raw = std::fs::read_to_string(
-            dir.path().join(OPENCRAB_DIR).join(TEAM_FILE),
-        )
-        .unwrap();
+        let raw = std::fs::read_to_string(dir.path().join(OPENCRAB_DIR).join(TEAM_FILE)).unwrap();
         let parsed: TeamConfig = serde_json::from_str(&raw).unwrap();
         assert_eq!(parsed.template_id, "solo_pm");
     }

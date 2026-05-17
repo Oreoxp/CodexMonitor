@@ -98,7 +98,10 @@ pub(crate) async fn read_image_as_data_url(
     let mobile_runtime = cfg!(any(target_os = "ios", target_os = "android"));
     let remote_mode = remote_backend::is_remote_mode(&*state).await;
     if !mobile_runtime && !remote_mode {
-        return Err("Image conversion is only supported in remote backend mode or on mobile runtimes".to_string());
+        return Err(
+            "Image conversion is only supported in remote backend mode or on mobile runtimes"
+                .to_string(),
+        );
     }
 
     let normalized = codex_core::normalize_file_path(trimmed_path);

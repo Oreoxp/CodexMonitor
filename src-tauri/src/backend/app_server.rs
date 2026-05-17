@@ -28,10 +28,8 @@ use std::os::windows::process::CommandExt;
 // still reach into `backend::app_server` (codex/mod.rs, daemon binary,
 // shared/codex_core, etc.).
 pub(crate) use crate::codex_session::{
-    spawn_workspace_session, spawn_workspace_session_with_manager_inner,
-    WorkspaceSession,
+    spawn_workspace_session, spawn_workspace_session_with_manager_inner, WorkspaceSession,
 };
-
 
 pub(crate) fn build_codex_path_env(codex_bin: Option<&str>) -> Option<String> {
     let mut paths: Vec<PathBuf> = env::var_os("PATH")
@@ -218,4 +216,3 @@ pub(crate) async fn check_codex_installation(
         Some(version)
     })
 }
-

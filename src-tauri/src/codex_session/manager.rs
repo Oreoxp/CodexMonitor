@@ -101,12 +101,7 @@ where
         // No CodexSession exists yet, so we emit a synthetic event with
         // `transport: "unknown"`.  Once the transport is up the next event
         // will carry the real value.
-        self.emit_status_synthetic(
-            &workspace_id,
-            CodexSessionStatus::Starting,
-            "unknown",
-            None,
-        );
+        self.emit_status_synthetic(&workspace_id, CodexSessionStatus::Starting, "unknown", None);
 
         // ── 2. Create transport ─────────────────────────────────────────
         let bundle = match create_transport(
@@ -188,10 +183,9 @@ where
         // Build the reader-exit notifier adapter.  Holds an `Arc<Self>` so
         // it can call `notify_reader_exit` on the manager when the legacy
         // reader loop terminates.
-        let exit_notifier: Arc<dyn ReaderExitNotifier> =
-            Arc::new(ManagerExitNotifier::<E, S> {
-                manager: Arc::clone(self),
-            });
+        let exit_notifier: Arc<dyn ReaderExitNotifier> = Arc::new(ManagerExitNotifier::<E, S> {
+            manager: Arc::clone(self),
+        });
 
         // ── 4. Hand off to setup_session_runtime, sharing the rpc handle.
         // setup_session_runtime calls `rpc.start()` + `rpc.initialize()` and
@@ -269,11 +263,7 @@ where
     /// router's reader loop terminates.  Translates the exit cause into
     /// `Stopped` / `Disconnected` / `Crashed` based on the intentional-stop
     /// flag and the supplied error message.
-    pub(crate) async fn notify_reader_exit(
-        &self,
-        workspace_id: &str,
-        last_error: Option<String>,
-    ) {
+    pub(crate) async fn notify_reader_exit(&self, workspace_id: &str, last_error: Option<String>) {
         let session = {
             let sessions = self.sessions.lock().await;
             sessions.get(workspace_id).cloned()

@@ -8,8 +8,7 @@ use uuid::Uuid;
 
 use super::types::TeamConfig;
 
-const SOLO_PM_JSON: &str =
-    include_str!("../../../../sidecar/src/team/templates/solo_pm.json");
+const SOLO_PM_JSON: &str = include_str!("../../../../sidecar/src/team/templates/solo_pm.json");
 const PM_PLUS_ONE_DEV_JSON: &str =
     include_str!("../../../../sidecar/src/team/templates/pm_plus_one_dev.json");
 const PM_TWO_DEV_QA_JSON: &str =
@@ -18,7 +17,11 @@ const PM_TWO_DEV_QA_JSON: &str =
 /// Display metadata for the three built-in templates. Order is the order
 /// shown in the picker. Consumed by `list_templates`.
 pub(crate) const TEMPLATE_METADATA: &[(&str, &str, &str)] = &[
-    ("solo_pm", "Solo PM", "Just a PM. Closest to a single-agent chat experience."),
+    (
+        "solo_pm",
+        "Solo PM",
+        "Just a PM. Closest to a single-agent chat experience.",
+    ),
     (
         "pm_plus_one_dev",
         "PM + 1 Dev",
@@ -134,8 +137,7 @@ mod tests {
     fn test_instantiate_template_reference_remap() {
         let team = instantiate_template("pm_two_dev_qa").unwrap();
 
-        let agent_ids: HashSet<&str> =
-            team.agents.iter().map(|a| a.id.as_str()).collect();
+        let agent_ids: HashSet<&str> = team.agents.iter().map(|a| a.id.as_str()).collect();
 
         // No placeholder ids should leak through.
         for id in &agent_ids {
@@ -146,15 +148,26 @@ mod tests {
         }
 
         // Every subscription publisher + subscriber must resolve to an
-        // instantiated agent id.
+        // instantiated agent id, **except** the literal `user`
+        // pseudo-publisher — that's the canonical "the human talks to
+        // PM" topology and is identity-stable across template
+        // instantiations. Mirrors sidecar's `TeamConfigSchema.superRefine`
+        // which already special-cases `USER_PUBLISHER`. Without this
+        // skip, the test fails as "publisher user not in agent ids".
+        use crate::team_config::types::USER_PUBLISHER;
         assert!(!team.subscriptions.is_empty());
         for sub in &team.subscriptions {
-            assert!(
-                agent_ids.contains(sub.publisher.as_str()),
-                "publisher {} not in agent ids",
-                sub.publisher
-            );
+            if sub.publisher != USER_PUBLISHER {
+                assert!(
+                    agent_ids.contains(sub.publisher.as_str()),
+                    "publisher {} not in agent ids",
+                    sub.publisher
+                );
+            }
             for s in &sub.subscribers {
+                if s == USER_PUBLISHER {
+                    continue;
+                }
                 assert!(
                     agent_ids.contains(s.as_str()),
                     "subscriber {s} not in agent ids"
@@ -166,8 +179,7 @@ mod tests {
     #[test]
     fn test_instantiate_template_created_at() {
         let team = instantiate_template("pm_plus_one_dev").unwrap();
-        DateTime::parse_from_rfc3339(&team.created_at).unwrap_or_else(|e| {
-            panic!("created_at not RFC3339: {} ({e})", team.created_at)
-        });
+        DateTime::parse_from_rfc3339(&team.created_at)
+            .unwrap_or_else(|e| panic!("created_at not RFC3339: {} ({e})", team.created_at));
     }
 }

@@ -149,9 +149,15 @@ mod tests {
     #[test]
     fn read_returns_missing_when_root_absent() {
         let root = temp_dir();
-        let response =
-            read_text_file_within(&root, "AGENTS.md", true, "OPENCRAB_HOME", "AGENTS.md", false)
-                .expect("read should succeed");
+        let response = read_text_file_within(
+            &root,
+            "AGENTS.md",
+            true,
+            "OPENCRAB_HOME",
+            "AGENTS.md",
+            false,
+        )
+        .expect("read should succeed");
         assert!(!response.exists);
         assert!(response.content.is_empty());
     }
@@ -169,9 +175,15 @@ mod tests {
             false,
         )
         .expect("write should succeed");
-        let response =
-            read_text_file_within(&root, "AGENTS.md", false, "OPENCRAB_HOME", "AGENTS.md", false)
-                .expect("read should succeed");
+        let response = read_text_file_within(
+            &root,
+            "AGENTS.md",
+            false,
+            "OPENCRAB_HOME",
+            "AGENTS.md",
+            false,
+        )
+        .expect("read should succeed");
         assert!(response.exists);
         assert_eq!(response.content, "hello");
     }
@@ -249,9 +261,15 @@ mod tests {
         let link_path = root.join("AGENTS.md");
         symlink(&outside_file, &link_path).expect("create symlink");
 
-        let response =
-            read_text_file_within(&root, "AGENTS.md", false, "OPENCRAB_HOME", "AGENTS.md", true)
-                .expect("read should succeed");
+        let response = read_text_file_within(
+            &root,
+            "AGENTS.md",
+            false,
+            "OPENCRAB_HOME",
+            "AGENTS.md",
+            true,
+        )
+        .expect("read should succeed");
         assert!(response.exists);
         assert_eq!(response.content, "outside");
     }

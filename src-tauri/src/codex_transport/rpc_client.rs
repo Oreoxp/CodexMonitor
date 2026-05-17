@@ -95,9 +95,7 @@ impl CodexRpcClient {
     /// Must be taken at most once (subsequent calls return `None`).
     /// The payload is `None` for clean EOF / explicit shutdown and
     /// `Some(message)` if the transport reported an error.
-    pub(crate) async fn take_exit_signal(
-        &self,
-    ) -> Option<oneshot::Receiver<Option<String>>> {
+    pub(crate) async fn take_exit_signal(&self) -> Option<oneshot::Receiver<Option<String>>> {
         self.exit_signal_rx.lock().await.take()
     }
 
@@ -201,7 +199,8 @@ impl CodexRpcClient {
             "params": params,
         });
 
-        let line = serde_json::to_string(&message).map_err(|e| TransportError::io(e.to_string()))?;
+        let line =
+            serde_json::to_string(&message).map_err(|e| TransportError::io(e.to_string()))?;
         if let Err(e) = self.transport.send(&line).await {
             self.pending.lock().await.remove(&id);
             return Err(e);
@@ -230,7 +229,8 @@ impl CodexRpcClient {
         result: Value,
     ) -> Result<(), TransportError> {
         let message = json!({ "id": id, "result": result });
-        let line = serde_json::to_string(&message).map_err(|e| TransportError::io(e.to_string()))?;
+        let line =
+            serde_json::to_string(&message).map_err(|e| TransportError::io(e.to_string()))?;
         self.transport.send(&line).await
     }
 
@@ -246,7 +246,8 @@ impl CodexRpcClient {
             json!({ "method": method })
         };
 
-        let line = serde_json::to_string(&message).map_err(|e| TransportError::io(e.to_string()))?;
+        let line =
+            serde_json::to_string(&message).map_err(|e| TransportError::io(e.to_string()))?;
         self.transport.send(&line).await
     }
 
@@ -254,10 +255,7 @@ impl CodexRpcClient {
     ///
     /// Sends an `initialize` request with client metadata and capability
     /// declarations, then follows up with an `initialized` notification.
-    pub(crate) async fn initialize(
-        &self,
-        client_version: &str,
-    ) -> Result<Value, TransportError> {
+    pub(crate) async fn initialize(&self, client_version: &str) -> Result<Value, TransportError> {
         let params = json!({
             "clientInfo": {
                 "name": "codex_monitor",

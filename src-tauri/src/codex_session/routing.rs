@@ -42,15 +42,13 @@ pub(crate) struct SessionRouting {
     pub(crate) hidden_thread_ids: Mutex<HashSet<String>>,
     /// `thread_id → mpsc sender` for callers awaiting background-thread
     /// notifications (commit-message generation, run-metadata, etc.).
-    pub(crate) background_thread_callbacks:
-        Mutex<HashMap<String, mpsc::UnboundedSender<Value>>>,
+    pub(crate) background_thread_callbacks: Mutex<HashMap<String, mpsc::UnboundedSender<Value>>>,
     /// `thread_id → fan-out tap senders`. Phase 2.C: sidecar's blocking
     /// `codex_send_user_message` registers a tap so it can drain the
     /// `agentMessage/delta` stream and break on `turn/completed`. Unlike
     /// `background_thread_callbacks`, taps run **alongside** the UI emit —
     /// they never suppress notifications from reaching the frontend.
-    pub(crate) tap_thread_callbacks:
-        Mutex<HashMap<String, Vec<mpsc::UnboundedSender<Value>>>>,
+    pub(crate) tap_thread_callbacks: Mutex<HashMap<String, Vec<mpsc::UnboundedSender<Value>>>>,
 }
 
 impl SessionRouting {
@@ -213,10 +211,8 @@ pub(crate) fn normalize_root_path(value: &str) -> String {
     }
 
     let bytes = normalized.as_bytes();
-    let is_drive_path = bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && bytes[2] == b'/';
+    let is_drive_path =
+        bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/';
     if is_drive_path || normalized.starts_with("//") {
         normalized.to_ascii_lowercase()
     } else {
@@ -240,7 +236,12 @@ mod tests {
             "owner + new workspace"
         );
         assert_eq!(
-            routing.workspace_roots.lock().await.get("ws-other").cloned(),
+            routing
+                .workspace_roots
+                .lock()
+                .await
+                .get("ws-other")
+                .cloned(),
             Some("/tmp/repo".to_string())
         );
         routing.unregister_workspace("ws-other").await;
@@ -262,7 +263,10 @@ mod tests {
             Some("ws-1".to_string())
         );
         routing.forget_thread_workspace_mapping("thr-a").await;
-        assert!(routing.resolve_workspace_for_thread("thr-a").await.is_none());
+        assert!(routing
+            .resolve_workspace_for_thread("thr-a")
+            .await
+            .is_none());
     }
 
     #[tokio::test]
@@ -279,7 +283,9 @@ mod tests {
     async fn background_callback_round_trip() {
         let routing = SessionRouting::new("ws-1".to_string());
         let (tx, _rx) = mpsc::unbounded_channel::<Value>();
-        routing.register_background_callback("thr-bg".to_string(), tx).await;
+        routing
+            .register_background_callback("thr-bg".to_string(), tx)
+            .await;
         assert!(routing.take_background_callback("thr-bg").await.is_some());
         assert!(routing.take_background_callback("thr-bg").await.is_none());
     }

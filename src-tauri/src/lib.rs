@@ -32,6 +32,7 @@ mod sidecar_session;
 mod state;
 mod storage;
 mod tailscale;
+mod tasks;
 mod team_config;
 #[cfg(desktop)]
 mod terminal;
@@ -242,6 +243,12 @@ pub fn run() {
             team_config::read_team_config,
             team_config::create_team_from_template,
             team_config::list_templates,
+            tasks::list_tasks,
+            tasks::get_task,
+            tasks::transition_task,
+            tasks::approve_task,
+            tasks::reject_task,
+            tasks::update_task,
             codex::start_thread,
             codex::send_user_message,
             codex::turn_steer,

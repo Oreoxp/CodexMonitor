@@ -137,8 +137,9 @@ pub(crate) fn read_settings() -> Result<ModelProviderSettings, String> {
     let provider_block_exists = provider_table.is_some();
     let needs_name_migration = provider_block_exists && provider_name.is_none();
     if provider_block_exists && (needs_wire_api_migration || needs_name_migration) {
-        if let Some(providers_table) =
-            document.get_mut("model_providers").and_then(Item::as_table_mut)
+        if let Some(providers_table) = document
+            .get_mut("model_providers")
+            .and_then(Item::as_table_mut)
         {
             if needs_wire_api_migration {
                 set_or_remove_subtable_string(
@@ -229,7 +230,12 @@ pub(crate) fn write_settings(settings: &ModelProviderSettings) -> Result<(), Str
         "name",
         Some(provider_name.as_str()),
     );
-    set_or_remove_subtable_string(providers_table, &provider_key, "base_url", settings.base_url.as_deref());
+    set_or_remove_subtable_string(
+        providers_table,
+        &provider_key,
+        "base_url",
+        settings.base_url.as_deref(),
+    );
     // Direct API key — codex's `experimental_bearer_token` field lets us
     // store the secret in config.toml instead of going through env vars.
     set_or_remove_subtable_string(

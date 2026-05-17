@@ -32,16 +32,24 @@ pub(crate) fn normalize_windows_namespace_path(path: &str) -> String {
     if let Some(rest) = strip_prefix_ascii_case(path, "//?/UNC/") {
         return format!("//{rest}");
     }
-    if let Some(rest) = strip_prefix_ascii_case(path, r"\\?\").filter(|rest| starts_with_drive_path(rest)) {
+    if let Some(rest) =
+        strip_prefix_ascii_case(path, r"\\?\").filter(|rest| starts_with_drive_path(rest))
+    {
         return rest.to_string();
     }
-    if let Some(rest) = strip_prefix_ascii_case(path, "//?/").filter(|rest| starts_with_drive_path(rest)) {
+    if let Some(rest) =
+        strip_prefix_ascii_case(path, "//?/").filter(|rest| starts_with_drive_path(rest))
+    {
         return rest.to_string();
     }
-    if let Some(rest) = strip_prefix_ascii_case(path, r"\\.\").filter(|rest| starts_with_drive_path(rest)) {
+    if let Some(rest) =
+        strip_prefix_ascii_case(path, r"\\.\").filter(|rest| starts_with_drive_path(rest))
+    {
         return rest.to_string();
     }
-    if let Some(rest) = strip_prefix_ascii_case(path, "//./").filter(|rest| starts_with_drive_path(rest)) {
+    if let Some(rest) =
+        strip_prefix_ascii_case(path, "//./").filter(|rest| starts_with_drive_path(rest))
+    {
         return rest.to_string();
     }
 
@@ -178,7 +186,9 @@ mod tests {
     #[test]
     fn normalize_windows_namespace_path_preserves_other_namespace_forms() {
         assert_eq!(
-            normalize_windows_namespace_path(r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\repo"),
+            normalize_windows_namespace_path(
+                r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\repo"
+            ),
             r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\repo"
         );
         assert_eq!(

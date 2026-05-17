@@ -32,18 +32,18 @@
 //!    └─────────────────────┘
 //! ```
 
-mod transport;
-mod rpc_client;
 pub(crate) mod factory;
+mod rpc_client;
 pub(crate) mod stdio;
+mod transport;
 pub(crate) mod websocket;
 
-pub(crate) use transport::{CodexTransport, CodexTransportKind, TransportError};
-#[allow(unused_imports)]
-pub(crate) use rpc_client::CodexRpcClient;
 pub(crate) use factory::{create_transport, TransportBundle};
 #[allow(unused_imports)]
+pub(crate) use rpc_client::CodexRpcClient;
+#[allow(unused_imports)]
 pub(crate) use stdio::StdioTransport;
+pub(crate) use transport::{CodexTransport, CodexTransportKind, TransportError};
 #[allow(unused_imports)]
 pub(crate) use websocket::WebSocketTransport;
 

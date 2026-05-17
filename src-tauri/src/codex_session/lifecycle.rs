@@ -74,11 +74,7 @@ async fn setup_session_runtime<E: EventSink>(
 
     rpc.start().await;
 
-    let init_response = match timeout(
-        Duration::from_secs(15),
-        rpc.initialize(client_version),
-    )
-    .await
+    let init_response = match timeout(Duration::from_secs(15), rpc.initialize(client_version)).await
     {
         Ok(Ok(response)) => response,
         Ok(Err(err)) => {
@@ -241,13 +237,8 @@ pub(crate) fn start_router<E: EventSink>(
             loop {
                 match notification_rx.recv().await {
                     Ok(value) => {
-                        dispatch_notification(
-                            value,
-                            &routing,
-                            &fallback_workspace_id,
-                            &event_sink,
-                        )
-                        .await;
+                        dispatch_notification(value, &routing, &fallback_workspace_id, &event_sink)
+                            .await;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                     Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -593,7 +584,9 @@ pub(crate) fn extract_related_thread_ids(value: &Value) -> Vec<String> {
         };
         push_thread_id(
             out,
-            container.get("threadId").or_else(|| container.get("thread_id")),
+            container
+                .get("threadId")
+                .or_else(|| container.get("thread_id")),
         );
         push_thread_id(
             out,
@@ -647,7 +640,10 @@ pub(crate) fn extract_related_thread_ids(value: &Value) -> Vec<String> {
                 .or_else(|| container.get("agent_statuses")),
             out,
         );
-        if let Some(status_map) = container.get("statuses").and_then(|value| value.as_object()) {
+        if let Some(status_map) = container
+            .get("statuses")
+            .and_then(|value| value.as_object())
+        {
             out.extend(
                 status_map
                     .keys()
@@ -678,7 +674,9 @@ pub(crate) struct ThreadListEntry {
     pub(crate) is_memory_consolidation: bool,
 }
 
-pub(crate) fn extract_thread_entries_from_thread_list_result(value: &Value) -> Vec<ThreadListEntry> {
+pub(crate) fn extract_thread_entries_from_thread_list_result(
+    value: &Value,
+) -> Vec<ThreadListEntry> {
     fn collect_entries(input: &Value, out: &mut Vec<ThreadListEntry>) {
         if let Some(values) = input.as_array() {
             for value in values {
@@ -1114,15 +1112,27 @@ mod tests {
 
     #[test]
     fn hidden_thread_suppression_allows_rpc_responses() {
-        assert!(!should_suppress_hidden_thread_event(Some("thread/archived"), true));
-        assert!(!should_suppress_hidden_thread_event(Some("thread/updated"), true));
+        assert!(!should_suppress_hidden_thread_event(
+            Some("thread/archived"),
+            true
+        ));
+        assert!(!should_suppress_hidden_thread_event(
+            Some("thread/updated"),
+            true
+        ));
         assert!(!should_suppress_hidden_thread_event(None, true));
     }
 
     #[test]
     fn hidden_thread_suppression_still_blocks_non_exempt_notifications() {
-        assert!(should_suppress_hidden_thread_event(Some("thread/updated"), false));
-        assert!(!should_suppress_hidden_thread_event(Some("thread/archived"), false));
+        assert!(should_suppress_hidden_thread_event(
+            Some("thread/updated"),
+            false
+        ));
+        assert!(!should_suppress_hidden_thread_event(
+            Some("thread/archived"),
+            false
+        ));
         assert!(!should_suppress_hidden_thread_event(
             Some("codex/backgroundThread"),
             false

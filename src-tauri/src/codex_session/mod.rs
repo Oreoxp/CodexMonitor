@@ -25,6 +25,4 @@ pub(crate) use manager::{CodexSessionManager, SessionStatusSink};
 pub(crate) use routing::{normalize_root_path, SessionRouting};
 pub(crate) use session::{CodexSession, WorkspaceSession};
 #[allow(unused_imports)]
-pub(crate) use status::{
-    CodexSessionStatus, CodexSessionStatusEvent, SESSION_STATUS_EVENT,
-};
+pub(crate) use status::{CodexSessionStatus, CodexSessionStatusEvent, SESSION_STATUS_EVENT};

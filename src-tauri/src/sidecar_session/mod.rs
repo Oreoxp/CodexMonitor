@@ -7,6 +7,7 @@
 pub(crate) mod commands;
 pub(crate) mod inbound_ops;
 pub(crate) mod manager;
+pub(crate) mod plan_parser;
 pub(crate) mod session;
 pub(crate) mod status;
 pub(crate) mod team_router;

@@ -524,14 +524,7 @@ pub(crate) async fn start_review(
         .await;
     }
 
-    codex_core::start_review_core(
-        &state.sessions,
-        workspace_id,
-        thread_id,
-        target,
-        delivery,
-    )
-    .await
+    codex_core::start_review_core(&state.sessions, workspace_id, thread_id, target, delivery).await
 }
 
 #[tauri::command]
@@ -904,8 +897,7 @@ pub(crate) async fn get_config_model(
 
 /// Read the structured model + provider settings from `~/.opencrab/config.toml`.
 #[tauri::command]
-pub(crate) fn get_model_provider_settings()
-    -> Result<model_provider::ModelProviderSettings, String>
+pub(crate) fn get_model_provider_settings() -> Result<model_provider::ModelProviderSettings, String>
 {
     model_provider::read_settings()
 }

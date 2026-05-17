@@ -471,8 +471,7 @@ mod tests {
             args,
             vec![
                 "--goto".to_string(),
-                r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\repo\src\App.tsx:5"
-                    .to_string(),
+                r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\repo\src\App.tsx:5".to_string(),
             ]
         );
     }

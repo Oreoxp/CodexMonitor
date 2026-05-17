@@ -90,10 +90,8 @@ pub(crate) async fn create_transport(
     codex_home: Option<&PathBuf>,
     setting_kind: Option<CodexTransportKind>,
 ) -> Result<TransportBundle, String> {
-    let preferred = resolve_transport_kind(
-        std::env::var(ENV_TRANSPORT).ok().as_deref(),
-        setting_kind,
-    );
+    let preferred =
+        resolve_transport_kind(std::env::var(ENV_TRANSPORT).ok().as_deref(), setting_kind);
 
     let ws_url = resolve_ws_url();
     // `codex_bin`/`codex_args`/`codex_home`/`cwd` are only consumed by the
@@ -114,21 +112,16 @@ pub(crate) async fn create_transport(
                     })
                 }
                 Err(ws_err) => {
-                    let warning = format!(
-                        "WebSocket transport failed ({ws_err}), falling back to stdio"
-                    );
+                    let warning =
+                        format!("WebSocket transport failed ({ws_err}), falling back to stdio");
                     eprintln!("[TransportFactory] {warning}");
 
                     // Fallback to Stdio so the app stays usable when the
                     // backend daemon hasn't been started yet.
-                    let (transport, stderr_rx) = StdioTransport::spawn(
-                        codex_bin,
-                        codex_args,
-                        cwd,
-                        codex_home,
-                    )
-                    .await
-                    .map_err(|e| format!("stdio fallback also failed: {e}"))?;
+                    let (transport, stderr_rx) =
+                        StdioTransport::spawn(codex_bin, codex_args, cwd, codex_home)
+                            .await
+                            .map_err(|e| format!("stdio fallback also failed: {e}"))?;
 
                     Ok(TransportBundle {
                         transport: Arc::new(transport),
@@ -151,9 +144,8 @@ pub(crate) async fn create_transport(
                     })
                 }
                 Err(stdio_err) => {
-                    let warning = format!(
-                        "stdio transport failed ({stdio_err}), falling back to WebSocket"
-                    );
+                    let warning =
+                        format!("stdio transport failed ({stdio_err}), falling back to WebSocket");
                     eprintln!("[TransportFactory] {warning}");
 
                     let (transport, stderr_rx) = WebSocketTransport::connect(&ws_url)
@@ -263,4 +255,3 @@ mod tests {
         );
     }
 }
-

@@ -86,7 +86,10 @@ impl SidecarSession {
             )
         })?;
 
-        let stdin = child.stdin.take().ok_or_else(|| "sidecar stdin missing".to_string())?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "sidecar stdin missing".to_string())?;
         let stdout = child
             .stdout
             .take()
@@ -143,10 +146,7 @@ impl SidecarSession {
                                 if let Some(tx) = tx_opt {
                                     let _ = tx.send(resp);
                                 } else {
-                                    eprintln!(
-                                        "[sidecar/{}] orphan response id={}",
-                                        ws, resp.id
-                                    );
+                                    eprintln!("[sidecar/{}] orphan response id={}", ws, resp.id);
                                 }
                             }
                             Ok(_) => {}

@@ -61,12 +61,9 @@ impl StdioTransport {
             .await
             .map_err(|e| TransportError::io(e))?;
 
-        let mut command = build_codex_command_with_bin(
-            codex_bin,
-            codex_args,
-            vec!["app-server".to_string()],
-        )
-        .map_err(|e| TransportError::io(e))?;
+        let mut command =
+            build_codex_command_with_bin(codex_bin, codex_args, vec!["app-server".to_string()])
+                .map_err(|e| TransportError::io(e))?;
 
         command.current_dir(cwd);
         if let Some(path) = codex_home {

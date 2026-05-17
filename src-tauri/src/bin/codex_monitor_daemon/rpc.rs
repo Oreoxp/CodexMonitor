@@ -85,10 +85,7 @@ pub(super) fn parse_optional_string(value: &Value, key: &str) -> Option<String> 
     }
 }
 
-pub(super) fn parse_optional_nullable_string(
-    value: &Value,
-    key: &str,
-) -> Option<Option<String>> {
+pub(super) fn parse_optional_nullable_string(value: &Value, key: &str) -> Option<Option<String>> {
     match value {
         Value::Object(map) => match map.get(key) {
             Some(Value::Null) => Some(None),

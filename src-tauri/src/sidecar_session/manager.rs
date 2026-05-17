@@ -83,12 +83,8 @@ impl SidecarSessionManager {
                 stale.into_iter().filter_map(|id| map.remove(&id)).collect()
             };
 
-            match SidecarSession::spawn(
-                workspace_id.clone(),
-                workspace_path.clone(),
-                app_handle,
-            )
-            .await
+            match SidecarSession::spawn(workspace_id.clone(), workspace_path.clone(), app_handle)
+                .await
             {
                 Ok(session) => {
                     // Bind the sidecar to this workspace before releasing the
@@ -96,8 +92,7 @@ impl SidecarSessionManager {
                     // `init` is a bounded control handshake (workspace_path
                     // only), not a model/work message — holding the gate across
                     // it is fine and is what keeps check→spawn→register atomic.
-                    let init_params =
-                        serde_json::json!({ "workspace_path": workspace_path });
+                    let init_params = serde_json::json!({ "workspace_path": workspace_path });
                     match session.send_request("init", Some(init_params)).await {
                         Ok(_) => {
                             self.sessions
@@ -144,9 +139,7 @@ impl SidecarSessionManager {
                 session.kill().await;
                 Ok(())
             }
-            None => Err(format!(
-                "no sidecar running for workspace `{workspace_id}`"
-            )),
+            None => Err(format!("no sidecar running for workspace `{workspace_id}`")),
         }
     }
 
