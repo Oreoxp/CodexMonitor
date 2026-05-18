@@ -14,10 +14,14 @@
 // All commands look up `workspace_path` from `AppState.workspaces` by id, so
 // the frontend never has to know paths.
 
+use std::path::PathBuf;
+
 use serde_json::Value;
 use tauri::{AppHandle, State};
 
+use crate::bootstrap;
 use crate::state::AppState;
+use crate::team_config::{migrate_team_json_for_workspace, read_team_for_bootstrap};
 
 #[tauri::command]
 pub(crate) async fn start_sidecar(
@@ -74,6 +78,35 @@ pub(crate) async fn sidecar_provision(
         .get(&workspace_id)
         .await
         .ok_or_else(|| format!("no sidecar running for workspace `{}`", workspace_id))?;
+
+    let workspace_path: PathBuf = {
+        let map = state.workspaces.lock().await;
+        map.get(&workspace_id)
+            .map(|entry| PathBuf::from(&entry.path))
+            .ok_or_else(|| format!("unknown workspace_id: {}", workspace_id))?
+    };
+
+    // Phase 4 Steps 1 + 2 — team.json migration + double-layer bootstrap.
+    // The order is load-bearing:
+    //   1. migrate `<cwd>/.opencrab/team.json` → `~/.opencrab/team.json`
+    //      (one-shot, idempotent). Must run before any read so a freshly-
+    //      opened P3 workspace doesn't see "no team" and prompt the user
+    //      to recreate one.
+    //   2. read the canonical team.json from the user layer. Absence here
+    //      simply means no team is configured yet — sidecar provisioning
+    //      will return early downstream; the bootstrap skips the agent-
+    //      aware seeding (idempotent retry on next provision).
+    //   3. seed the user-layer and project-layer skeletons.
+    // Failures propagate to the caller — silent partial state is a known
+    // P3 anti-pattern.
+    migrate_team_json_for_workspace(&workspace_path)?;
+    if let Some(team) = read_team_for_bootstrap()? {
+        bootstrap::ensure_user_layer(&team.agents)
+            .map_err(|err| format!("bootstrap user layer: {err}"))?;
+        bootstrap::ensure_project_layer(&workspace_path, &team.id, &team.agents)
+            .map_err(|err| format!("bootstrap project layer: {err}"))?;
+    }
+
     let params = serde_json::json!({ "workspace_id": workspace_id });
     session
         .send_request("provision_and_start_router", Some(params))

@@ -20,7 +20,7 @@
 
 pub(crate) mod commands;
 mod state_machine;
-mod store;
+pub(crate) mod store;
 mod types;
 
 #[cfg(test)]

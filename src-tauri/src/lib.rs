@@ -7,15 +7,19 @@ use tauri::RunEvent;
 use tauri::WindowEvent;
 
 mod backend;
+mod bootstrap;
 mod codex;
 mod codex_session;
+mod codex_spawn;
 mod codex_transport;
 mod daemon_binary;
 mod dictation;
 mod event_sink;
+mod events;
 mod files;
 mod git;
 mod git_utils;
+mod kanban;
 mod local_usage;
 #[cfg(desktop)]
 mod menu;
@@ -249,6 +253,7 @@ pub fn run() {
             tasks::approve_task,
             tasks::reject_task,
             tasks::update_task,
+            events::list_team_events,
             codex::start_thread,
             codex::send_user_message,
             codex::turn_steer,

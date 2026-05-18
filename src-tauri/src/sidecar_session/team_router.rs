@@ -605,6 +605,65 @@ async fn handle_propose_plan_blocks(
             }
         }
 
+        // Phase 4 Step 6 — append a `task_proposed` event per row to
+        // `<cwd>/.opencrab/teams/<team_id>/events.jsonl`. Best-effort:
+        // an open / write failure is logged but never aborts the
+        // proposal (the row is already committed and the latch is
+        // already populated). Step 1's `ensure_project_layer` is
+        // responsible for the parent dirs + empty placeholder file.
+        {
+            let state = shared.app_handle.state::<AppState>();
+            match crate::events::get_or_create_event_log(
+                &state,
+                &workspace_path,
+                &shared.workspace_id,
+                &shared.team_id,
+            ) {
+                Ok(log) => {
+                    for task in &persisted {
+                        if let Err(err) = log.emit(
+                            Some(&task.id),
+                            crate::events::TeamEventBody::TaskProposed {
+                                agent_id: task.proposed_by_agent_id.clone(),
+                                title: task.title.clone(),
+                                description: task.body.clone(),
+                            },
+                        ) {
+                            eprintln!(
+                                "[events] task_proposed emit failed for task={}: {err}",
+                                task.id
+                            );
+                        }
+                    }
+                }
+                Err(err) => {
+                    eprintln!(
+                        "[events] cannot open log for team={}: {err}; \
+                         skipping {} task_proposed events",
+                        shared.team_id,
+                        persisted.len()
+                    );
+                }
+            }
+            drop(state);
+        }
+
+        // Phase 4 Step 7 — re-render every agent's KANBAN.md so the
+        // freshly-proposed tasks show up in the Proposed column on the
+        // next prompt assembly. Best-effort: a render / write failure
+        // logs to stderr; the rows are already committed and the
+        // events are already appended.
+        if let Err(err) = crate::kanban::regenerate_all_kanbans(
+            &workspace_path,
+            &shared.workspace_id,
+            &shared.team_id,
+        ) {
+            eprintln!(
+                "[kanban] regenerate skipped for workspace={} team={}: {err}",
+                shared.workspace_id, shared.team_id
+            );
+        }
+
         // Emit a Tauri event so the (Step 4) plan-review modal can react.
         // The event NAME is the single Step-2 contract the frontend will
         // pin against; payload fields can grow additively.

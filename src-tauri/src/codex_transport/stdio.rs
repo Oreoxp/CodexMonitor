@@ -55,15 +55,32 @@ impl StdioTransport {
         codex_args: Option<&str>,
         cwd: &str,
         codex_home: Option<&PathBuf>,
+        team_session_dir: Option<&std::path::Path>,
     ) -> Result<(Self, StderrReceiver), TransportError> {
         // Verify installation first.
         let _ = check_codex_installation(codex_bin.clone())
             .await
             .map_err(|e| TransportError::io(e))?;
 
-        let mut command =
-            build_codex_command_with_bin(codex_bin, codex_args, vec!["app-server".to_string()])
-                .map_err(|e| TransportError::io(e))?;
+        // Phase 4 Step 8 — when the caller supplies a `team_session_dir`,
+        // pass `--team-session-dir <path>` to `codex app-server` so the
+        // forked codex-cli (branch `opencrab-team-session-dir`) writes
+        // rollouts directly under that path. The path is library-caller-
+        // computed (see `codex_transport::factory`) so the daemon
+        // binary, which doesn't have the bootstrap module, can pass
+        // `None` and stay on upstream defaults.
+        //
+        // Unpatched / upstream codex will reject the unknown flag at
+        // parse time, surfacing a clear "unrecognized argument" error
+        // before spawn — better than silently writing to the legacy
+        // location.
+        let mut app_server_args: Vec<String> = vec!["app-server".to_string()];
+        if let Some(dir) = team_session_dir {
+            app_server_args.push("--team-session-dir".to_string());
+            app_server_args.push(dir.to_string_lossy().into_owned());
+        }
+        let mut command = build_codex_command_with_bin(codex_bin, codex_args, app_server_args)
+            .map_err(|e| TransportError::io(e))?;
 
         command.current_dir(cwd);
         if let Some(path) = codex_home {

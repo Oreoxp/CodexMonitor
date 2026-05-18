@@ -90,9 +90,23 @@ impl SidecarSessionManager {
                     // Bind the sidecar to this workspace before releasing the
                     // gate so no other op can race the half-initialized child.
                     // `init` is a bounded control handshake (workspace_path
-                    // only), not a model/work message — holding the gate across
-                    // it is fine and is what keeps check→spawn→register atomic.
-                    let init_params = serde_json::json!({ "workspace_path": workspace_path });
+                    // + double-layer roots), not a model/work message —
+                    // holding the gate across it is fine and is what keeps
+                    // check→spawn→register atomic. Phase 4 Step 3: hand the
+                    // sidecar the user / project layer absolute paths so its
+                    // file loader does NOT resolve `~` or duplicate the
+                    // Tauri-side path policy. Failing to resolve $HOME is
+                    // non-fatal here — sidecar simply won't have a loader
+                    // until later phases require one.
+                    let mut init_params = serde_json::json!({ "workspace_path": workspace_path });
+                    let project_dir =
+                        crate::bootstrap::project_data_dir(std::path::Path::new(&workspace_path));
+                    init_params["project_data_dir"] =
+                        serde_json::Value::String(project_dir.to_string_lossy().into_owned());
+                    if let Ok(user_dir) = crate::bootstrap::user_data_dir() {
+                        init_params["user_data_dir"] =
+                            serde_json::Value::String(user_dir.to_string_lossy().into_owned());
+                    }
                     match session.send_request("init", Some(init_params)).await {
                         Ok(_) => {
                             self.sessions

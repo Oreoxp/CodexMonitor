@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use tauri::State;
 
+use crate::events::{event_for_transition, get_or_create_event_log, TeamEventBody};
 use crate::state::AppState;
 
 use super::state_machine::TaskError;
@@ -45,6 +46,43 @@ pub(crate) struct CreateTaskDevOnlyInput {
 
 fn map_err(err: TaskError) -> String {
     err.to_string()
+}
+
+/// Best-effort emit. events.jsonl is NOT a source of truth — failing to
+/// append must NEVER fail the user's task transition (which already
+/// committed to sqlite). We surface failures via stderr only.
+fn emit_event_best_effort(
+    state: &AppState,
+    workspace_root: &Path,
+    workspace_id: &str,
+    task: &Task,
+    body: TeamEventBody,
+) {
+    let log = match get_or_create_event_log(state, workspace_root, workspace_id, &task.team_id) {
+        Ok(log) => log,
+        Err(err) => {
+            eprintln!(
+                "[events] skip emit for task={} team={}: {err}",
+                task.id, task.team_id
+            );
+            return;
+        }
+    };
+    if let Err(err) = log.emit(Some(&task.id), body) {
+        eprintln!(
+            "[events] emit failed for task={} team={}: {err}",
+            task.id, task.team_id
+        );
+    }
+}
+
+/// Phase 4 Step 7 — re-render every agent's KANBAN.md after a successful
+/// transition. Best-effort: a render / write failure logs to stderr and
+/// returns; the transition (already committed) is unaffected.
+fn regenerate_kanban_best_effort(workspace_root: &Path, workspace_id: &str, team_id: &str) {
+    if let Err(err) = crate::kanban::regenerate_all_kanbans(workspace_root, workspace_id, team_id) {
+        eprintln!("[kanban] regenerate skipped for workspace={workspace_id} team={team_id}: {err}");
+    }
 }
 
 async fn workspace_root(state: &AppState, workspace_id: &str) -> Result<PathBuf, String> {
@@ -178,7 +216,19 @@ pub(crate) async fn transition_task(
     state: State<'_, AppState>,
 ) -> Result<Task, String> {
     let root = workspace_root(&state, &workspace_id).await?;
-    transition_task_at_path(&root, &task_id, new_status, &actor).map_err(map_err)
+    // Phase 4 Step 6: capture the prior status BEFORE the transition so
+    // the (from, to) → TeamEventBody mapping is deterministic. One extra
+    // single-row SELECT per transition; cheap.
+    let from = get_task_at_path(&root, &task_id)
+        .map_err(map_err)?
+        .ok_or_else(|| format!("[ERR_NOT_FOUND] task not found: {task_id}"))?
+        .status;
+    let task = transition_task_at_path(&root, &task_id, new_status, &actor).map_err(map_err)?;
+    if let Some(body) = event_for_transition(from, new_status, &actor, None) {
+        emit_event_best_effort(&state, &root, &workspace_id, &task, body);
+    }
+    regenerate_kanban_best_effort(&root, &workspace_id, &task.team_id);
+    Ok(task)
 }
 
 // Retired Phase 3 closeout (Step 4 §11.7): the Tauri command form of
@@ -249,6 +299,19 @@ pub(crate) async fn approve_task(
     let root = workspace_root(&state, &workspace_id).await?;
     let task =
         transition_task_at_path(&root, &task_id, TaskStatus::Ready, &actor).map_err(map_err)?;
+    // Phase 4 Step 6: emit AFTER the state-machine commit. From is
+    // always Proposed for this code path (approve only fires on
+    // Proposed → Ready); skip the prior-read.
+    emit_event_best_effort(
+        &state,
+        &root,
+        &workspace_id,
+        &task,
+        TeamEventBody::TaskApproved {
+            approved_by: actor.clone(),
+        },
+    );
+    regenerate_kanban_best_effort(&root, &workspace_id, &task.team_id);
     // Clone the Arc<TeamRouters> so we can release the State<AppState>
     // borrow before awaiting the router call (which itself takes locks on
     // pending_approvals and may dispatch a system reply that runs other
@@ -280,6 +343,21 @@ pub(crate) async fn reject_task(
         feedback_clean,
     )
     .map_err(map_err)?;
+    // Phase 4 Step 6: emit TaskRejected (not TaskArchived) because the
+    // reject path is Proposed → Archived and the state-machine semantics
+    // distinguish the two destinations. Reason carries the cleaned
+    // feedback (None when empty / whitespace-only).
+    emit_event_best_effort(
+        &state,
+        &root,
+        &workspace_id,
+        &task,
+        TeamEventBody::TaskRejected {
+            rejected_by: actor.clone(),
+            reason: feedback_clean.map(str::to_string),
+        },
+    );
+    regenerate_kanban_best_effort(&root, &workspace_id, &task.team_id);
     let routers = state.team_routers.clone();
     let pm_notified = routers
         .notify_rejected(&workspace_id, &task, feedback.as_deref())

@@ -7,14 +7,28 @@
 //! If the preferred transport fails to start or connect, it automatically
 //! falls back to the other transport and emits a warning.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
+use crate::codex_spawn;
+
 use super::stdio::StdioTransport;
 use super::transport::{CodexTransport, CodexTransportKind};
 use super::websocket::WebSocketTransport;
+
+/// Phase 4 Step 8 — best-effort compute the per-workspace rollout dir
+/// for `--team-session-dir <path>`. Returns `None` if $HOME is
+/// unresolved or `cwd` cannot be canonicalized; callers fall back to
+/// spawning without the flag (codex-cli writes to its own default
+/// `<CODEX_HOME>/sessions/YYYY/MM/DD/`). Logs to stderr on failure so
+/// the regression surfaces without aborting the spawn. Delegates to
+/// `codex_spawn::ensure_team_session_dir_for_cwd` so the daemon binary
+/// can share the exact same code path (no `bootstrap` dep needed).
+fn compute_team_session_dir(cwd: &str) -> Option<PathBuf> {
+    codex_spawn::ensure_team_session_dir_for_cwd(Path::new(cwd))
+}
 
 /// Environment variable to override the transport mode.
 ///
@@ -118,10 +132,16 @@ pub(crate) async fn create_transport(
 
                     // Fallback to Stdio so the app stays usable when the
                     // backend daemon hasn't been started yet.
-                    let (transport, stderr_rx) =
-                        StdioTransport::spawn(codex_bin, codex_args, cwd, codex_home)
-                            .await
-                            .map_err(|e| format!("stdio fallback also failed: {e}"))?;
+                    let team_session_dir = compute_team_session_dir(cwd);
+                    let (transport, stderr_rx) = StdioTransport::spawn(
+                        codex_bin,
+                        codex_args,
+                        cwd,
+                        codex_home,
+                        team_session_dir.as_deref(),
+                    )
+                    .await
+                    .map_err(|e| format!("stdio fallback also failed: {e}"))?;
 
                     Ok(TransportBundle {
                         transport: Arc::new(transport),
@@ -133,7 +153,16 @@ pub(crate) async fn create_transport(
             }
         }
         CodexTransportKind::Stdio => {
-            match StdioTransport::spawn(codex_bin, codex_args, cwd, codex_home).await {
+            let team_session_dir = compute_team_session_dir(cwd);
+            match StdioTransport::spawn(
+                codex_bin,
+                codex_args,
+                cwd,
+                codex_home,
+                team_session_dir.as_deref(),
+            )
+            .await
+            {
                 Ok((transport, stderr_rx)) => {
                     eprintln!("[TransportFactory] using stdio transport");
                     Ok(TransportBundle {

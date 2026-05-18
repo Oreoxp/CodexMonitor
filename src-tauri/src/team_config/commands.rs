@@ -1,18 +1,25 @@
-// Tauri commands for reading and creating team.json under
-// <workspace.path>/.opencrab/. Local-mode only in Phase 0a; remote-backend
-// mode is a TODO (see workspaces/commands.rs for the pattern).
+// Tauri commands for reading and creating team.json.
 //
-// The on-disk work is factored into `read_team_at_path` / `create_team_at_path`
-// pure helpers that take a workspace root `Path` directly. The
-// `#[tauri::command]` wrappers below resolve the workspace_id → path via
-// AppState, then delegate. This lets the helpers be unit-tested with a
-// tempdir without spinning up a Tauri State<AppState>.
+// Phase 4 Step 2 (2026-05-18): team.json moved from the project layer
+// (`<cwd>/.opencrab/team.json`) to the user layer (`~/.opencrab/team.json`)
+// as the single, machine-wide location. Migration is performed by
+// `bootstrap::migrate_team_json` as a precondition of every command in
+// this module — first call moves the project-layer copy to the user layer
+// and renames the source to `team.json.legacy`; subsequent calls are
+// no-ops via `UsedExistingHomeFile`.
+//
+// `workspace_id` is **retained** in both Tauri command signatures for
+// frontend / wire compatibility (the frontend keeps passing it) but is
+// only used to resolve `cwd` for the migration check; once migration is
+// settled the file lives at the user layer regardless of workspace.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 
 use serde::Serialize;
 use tauri::State;
 
+use crate::bootstrap::{migrate_team_json, team_json_path, write_team_json_atomic, BootstrapError};
 use crate::state::AppState;
 
 use super::templates::{instantiate_template, TEMPLATE_METADATA};
@@ -38,9 +45,6 @@ pub(crate) async fn list_templates() -> Result<Vec<TemplateInfo>, String> {
         .collect())
 }
 
-const OPENCRAB_DIR: &str = ".opencrab";
-const TEAM_FILE: &str = "team.json";
-
 async fn workspace_root(state: &AppState, workspace_id: &str) -> Result<PathBuf, String> {
     let workspaces = state.workspaces.lock().await;
     let entry = workspaces
@@ -49,10 +53,14 @@ async fn workspace_root(state: &AppState, workspace_id: &str) -> Result<PathBuf,
     Ok(PathBuf::from(&entry.path))
 }
 
-/// Read `<workspace_root>/.opencrab/team.json` if present. Pure function —
-/// touches the filesystem only via std::fs.
-pub(crate) fn read_team_at_path(workspace_root: &Path) -> Result<Option<TeamConfig>, String> {
-    let team_json = workspace_root.join(OPENCRAB_DIR).join(TEAM_FILE);
+/// Read `~/.opencrab/team.json` if present (Step 2: user layer is the
+/// authoritative location). Pure function — touches the filesystem only
+/// via std::fs.
+///
+/// Callers that own a workspace context should call
+/// [`migrate_team_json`] first; the read itself is layer-agnostic.
+pub(crate) fn read_team_from_user_layer() -> Result<Option<TeamConfig>, String> {
+    let team_json = team_json_path().map_err(map_bootstrap_err)?;
     if !team_json.exists() {
         return Ok(None);
     }
@@ -63,18 +71,13 @@ pub(crate) fn read_team_at_path(workspace_root: &Path) -> Result<Option<TeamConf
     Ok(Some(config))
 }
 
-/// Instantiate `template_id` and write it to `<workspace_root>/.opencrab/team.json`.
-/// Refuses to overwrite an existing file. Pure function — touches the
-/// filesystem only via std::fs.
-pub(crate) fn create_team_at_path(
-    workspace_root: &Path,
-    template_id: &str,
-) -> Result<TeamConfig, String> {
-    let opencrab_dir = workspace_root.join(OPENCRAB_DIR);
-    std::fs::create_dir_all(&opencrab_dir)
-        .map_err(|err| format!("create {}: {err}", opencrab_dir.display()))?;
-
-    let team_json = opencrab_dir.join(TEAM_FILE);
+/// Instantiate `template_id` and write it to `~/.opencrab/team.json`
+/// (Step 2: user layer). Atomic write via `<path>.tmp` + fsync + rename.
+/// Refuses to overwrite an existing team — frontend must surface a clear
+/// "team already exists" error so the user can choose to load the
+/// existing roster vs. discard it manually.
+pub(crate) fn create_team_at_user_layer(template_id: &str) -> Result<TeamConfig, String> {
+    let team_json = team_json_path().map_err(map_bootstrap_err)?;
     if team_json.exists() {
         return Err(format!("team already exists at {}", team_json.display()));
     }
@@ -82,10 +85,22 @@ pub(crate) fn create_team_at_path(
     let config = instantiate_template(template_id)?;
     let serialized = serde_json::to_string_pretty(&config)
         .map_err(|err| format!("serialize team config: {err}"))?;
-    std::fs::write(&team_json, serialized)
-        .map_err(|err| format!("write {}: {err}", team_json.display()))?;
+    write_team_json_atomic(serialized.as_bytes()).map_err(map_bootstrap_err)?;
 
     Ok(config)
+}
+
+/// Run the Step-2 migration as a precondition. Calls with a fresh
+/// workspace cwd; idempotent across repeated invocations within the same
+/// process.
+fn migrate_for_workspace(workspace_root: &Path) -> Result<(), String> {
+    migrate_team_json(workspace_root)
+        .map(|_| ())
+        .map_err(map_bootstrap_err)
+}
+
+fn map_bootstrap_err(err: BootstrapError) -> String {
+    format!("{err}")
 }
 
 #[tauri::command]
@@ -95,7 +110,8 @@ pub(crate) async fn read_team_config(
 ) -> Result<Option<TeamConfig>, String> {
     // TODO(remote): branch on remote_backend::is_remote_mode and proxy via RPC.
     let root = workspace_root(&state, &workspace_id).await?;
-    read_team_at_path(&root)
+    migrate_for_workspace(&root)?;
+    read_team_from_user_layer()
 }
 
 #[tauri::command]
@@ -106,64 +122,24 @@ pub(crate) async fn create_team_from_template(
 ) -> Result<TeamConfig, String> {
     // TODO(remote): branch on remote_backend::is_remote_mode and proxy via RPC.
     let root = workspace_root(&state, &workspace_id).await?;
-    create_team_at_path(&root, &template_id)
+    migrate_for_workspace(&root)?;
+    create_team_at_user_layer(&template_id)
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// Internal helper: the Step-1 sidecar_provision wiring uses this to read
+// the (post-migration) team config without rebuilding the path. Re-exported
+// from the module so call sites stay short.
+pub(crate) use read_team_from_user_layer as read_team_for_bootstrap;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn test_create_team_from_template_writes_file() {
-        let dir = tempdir().unwrap();
-        // .opencrab does not exist yet.
-        assert!(!dir.path().join(OPENCRAB_DIR).exists());
-
-        let config = create_team_at_path(dir.path(), "solo_pm").unwrap();
-        assert!(config.id.starts_with("team_"));
-
-        let team_json = dir.path().join(OPENCRAB_DIR).join(TEAM_FILE);
-        assert!(team_json.exists());
-
-        let raw = std::fs::read_to_string(&team_json).unwrap();
-        let parsed: TeamConfig = serde_json::from_str(&raw).unwrap();
-        assert_eq!(parsed.id, config.id);
-        assert_eq!(parsed.template_id, "solo_pm");
-    }
-
-    #[test]
-    fn test_create_team_from_template_refuses_overwrite() {
-        let dir = tempdir().unwrap();
-        create_team_at_path(dir.path(), "solo_pm").unwrap();
-
-        let err = create_team_at_path(dir.path(), "solo_pm").unwrap_err();
-        assert!(err.contains("team already exists"), "got: {err}");
-
-        // The pre-existing team.json must NOT have been clobbered.
-        let raw = std::fs::read_to_string(dir.path().join(OPENCRAB_DIR).join(TEAM_FILE)).unwrap();
-        let parsed: TeamConfig = serde_json::from_str(&raw).unwrap();
-        assert_eq!(parsed.template_id, "solo_pm");
-    }
-
-    #[test]
-    fn test_read_team_config_missing() {
-        let dir = tempdir().unwrap();
-        let result = read_team_at_path(dir.path()).unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_read_team_config_existing() {
-        let dir = tempdir().unwrap();
-        let created = create_team_at_path(dir.path(), "pm_plus_one_dev").unwrap();
-        let loaded = read_team_at_path(dir.path()).unwrap().unwrap();
-        assert_eq!(loaded.id, created.id);
-        assert_eq!(loaded.template_id, "pm_plus_one_dev");
-        assert_eq!(loaded.agents.len(), 2);
-    }
+// Re-export for any caller that still wants the workspace-scoped migrate
+// helper without going through the Tauri-command surface (e.g. the new
+// sidecar_provision wiring in Step 2).
+pub(crate) fn migrate_team_json_for_workspace(workspace_root: &Path) -> Result<(), String> {
+    migrate_for_workspace(workspace_root)
 }
+
+// Path-driven I/O test coverage lives in `bootstrap::tests`, which can
+// inject a tempdir for HOME. The Tauri-command wrappers above are
+// `#[tauri::command]` async fns that resolve workspace_id from
+// `AppState`, so they're exercised by integration tests / smoke runs
+// rather than unit tests in this module.

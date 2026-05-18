@@ -10,6 +10,9 @@ mod codex_home;
 #[path = "../codex_session/mod.rs"]
 mod codex_session;
 #[allow(dead_code)]
+#[path = "../codex_spawn/mod.rs"]
+mod codex_spawn;
+#[allow(dead_code)]
 #[path = "../codex_transport/mod.rs"]
 mod codex_transport;
 #[path = "../files/io.rs"]

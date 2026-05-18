@@ -1,5 +1,5 @@
 mod commands;
 mod templates;
-mod types;
+pub(crate) mod types;
 
 pub(crate) use commands::*;

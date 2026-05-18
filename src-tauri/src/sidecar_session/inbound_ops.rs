@@ -56,6 +56,14 @@ fn optional_str(params: &Value, key: &str) -> Option<String> {
 async fn handle_codex_start_thread(state: &AppState, params: &Value) -> Result<Value, String> {
     let workspace_id = required_str(params, "workspace_id")?;
     let developer_instructions = optional_str(params, "developer_instructions");
+    // Phase 4 Step 8-fix — optional per-agent identifiers. Both must be
+    // present for per-agent rollout isolation to kick in; either missing
+    // means we fall back to the workspace-scoped CLI flag set at spawn
+    // time (Step 8 default). Sidecar's `provisionAndStartRouter` always
+    // supplies them for team-mode threads; normal-mode start_thread does
+    // not call this reverse-RPC at all, so the fallback is just defense.
+    let agent_id = optional_str(params, "agent_id");
+    let team_id = optional_str(params, "team_id");
 
     // HYBRID injection — see docs/architecture/opencrab-3.0-prompt-strategy.md.
     // The agent role + comm guide is passed as `developerInstructions`;
@@ -81,6 +89,32 @@ async fn handle_codex_start_thread(state: &AppState, params: &Value) -> Result<V
     start_params.insert("approvalPolicy".to_string(), json!("never"));
     if let Some(dev) = developer_instructions {
         start_params.insert("developerInstructions".to_string(), json!(dev));
+    }
+    // Phase 4 Step 8-fix — compute per-agent rollout dir and pass it via
+    // `sessionDir` in the thread/start payload. The codex-cli fork
+    // (branch `opencrab-team-session-dir`) reads `ThreadStartParams.session_dir`
+    // and applies it as a post-load mutation of `Config.team_session_dir`
+    // before `RolloutRecorder::new` runs (`thread_processor.rs`
+    // `thread_start_task`). Best-effort: a validation error or missing
+    // $HOME logs to stderr + omits the field — codex-cli falls back to
+    // the CLI flag (Step 8 workspace-scoped value) or to
+    // `<CODEX_HOME>/sessions/YYYY/MM/DD/`.
+    if let (Some(agent_id), Some(team_id)) = (agent_id.as_deref(), team_id.as_deref()) {
+        match crate::codex_spawn::ensure_agent_team_session_dir_for_cwd(
+            agent_id,
+            team_id,
+            std::path::Path::new(&workspace_path),
+        ) {
+            Ok(dir) => {
+                start_params.insert("sessionDir".to_string(), json!(dir.to_string_lossy()));
+            }
+            Err(err) => {
+                eprintln!(
+                    "[codex_spawn] per-agent session_dir for agent={agent_id} team={team_id}: \
+                     {err}; thread/start will use the workspace-scoped fallback"
+                );
+            }
+        }
     }
     let raw = session
         .send_request_for_workspace(&workspace_id, "thread/start", Value::Object(start_params))

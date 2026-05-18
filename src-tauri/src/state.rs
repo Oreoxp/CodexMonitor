@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 use crate::codex_session::CodexSessionManager;
 use crate::dictation::DictationState;
 use crate::event_sink::TauriEventSink;
+use crate::events::EventLog;
 use crate::shared::codex_core::CodexLoginCancelState;
 use crate::sidecar_session::SidecarSessionManager;
 use crate::storage::{read_settings, read_workspaces};
@@ -59,6 +60,12 @@ pub(crate) struct AppState {
     pub(crate) dictation: Mutex<DictationState>,
     pub(crate) codex_login_cancels: Mutex<HashMap<String, CodexLoginCancelState>>,
     pub(crate) tcp_daemon: Mutex<TcpDaemonRuntime>,
+    /// Phase 4 Step 6 — registry of per-(workspace_id, team_id) event log
+    /// writers for `<cwd>/.opencrab/teams/<team_id>/events.jsonl`. `std`
+    /// mutex (not `tokio`) because every emit is a quick sync write — we
+    /// never `.await` while holding it. Lazily populated by
+    /// `events::get_or_create_event_log`.
+    pub(crate) event_logs: std::sync::Mutex<HashMap<(String, String), Arc<EventLog>>>,
 }
 
 impl AppState {
@@ -91,6 +98,7 @@ impl AppState {
             dictation: Mutex::new(DictationState::default()),
             codex_login_cancels: Mutex::new(HashMap::new()),
             tcp_daemon: Mutex::new(TcpDaemonRuntime::default()),
+            event_logs: std::sync::Mutex::new(HashMap::new()),
         }
     }
 }
