@@ -374,6 +374,13 @@ pub(crate) async fn remove_workspace(
     // `remove_workspace_core` then no-ops on the already-closed transport.
     state.session_manager.disconnect(&id).await;
 
+    // Capture the workspace root before `remove_workspace_core` drops the
+    // entry from state — needed to clean up `<cwd>/.opencrab/` afterwards.
+    let workspace_root = {
+        let workspaces = state.workspaces.lock().await;
+        workspaces.get(&id).map(|entry| PathBuf::from(&entry.path))
+    };
+
     workspaces_core::remove_workspace_core(
         id,
         &state.workspaces,
@@ -392,7 +399,17 @@ pub(crate) async fn remove_workspace(
         true,
         true,
     )
-    .await
+    .await?;
+
+    // Workspace removal succeeded — tear down the OpenCrab state that lived
+    // alongside it: `<cwd>/.opencrab/` plus the user-layer `team.json`.
+    // Runs after core so git `worktree remove` still sees the worktree
+    // dirs under `.opencrab/agents/<id>/worktree/`.
+    if let Some(root) = workspace_root {
+        crate::bootstrap::cleanup_workspace_state(&root);
+    }
+
+    Ok(())
 }
 
 #[tauri::command]

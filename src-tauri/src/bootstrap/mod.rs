@@ -361,5 +361,43 @@ pub(crate) fn write_team_json_atomic(content: &[u8]) -> Result<(), BootstrapErro
     atomic_write(&path, content)
 }
 
+/// Tear down OpenCrab state when a workspace is removed: the project-layer
+/// `<cwd>/.opencrab/` tree and the user-layer `~/.opencrab/team.json`.
+///
+/// `team.json` is a single machine-wide file (Phase 4 Step 2), so deleting
+/// it here resets team creation for *every* workspace — intentional, since
+/// without this the team picker never reappears once a team exists.
+///
+/// Best-effort: each failure is logged but never returned. Workspace
+/// removal has already succeeded by the time this runs, so a partial
+/// cleanup must not surface as a removal error.
+pub(crate) fn cleanup_workspace_state(cwd: &Path) {
+    let project_dir = project_data_dir(cwd);
+    if project_dir.is_dir() {
+        if let Err(err) = fs::remove_dir_all(&project_dir) {
+            eprintln!(
+                "[opencrab] cleanup: failed to remove {}: {err}",
+                project_dir.display()
+            );
+        }
+    }
+
+    match team_json_path() {
+        Ok(team_json) => {
+            if team_json.exists() {
+                if let Err(err) = fs::remove_file(&team_json) {
+                    eprintln!(
+                        "[opencrab] cleanup: failed to remove {}: {err}",
+                        team_json.display()
+                    );
+                }
+            }
+        }
+        Err(err) => {
+            eprintln!("[opencrab] cleanup: cannot resolve team.json path: {err}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;
