@@ -12,11 +12,9 @@ export type AgentConfig = {
   model: string;
   systemPromptTemplate: string;
   toolsPreset: ToolsPreset;
-  // Phase 2 pivot: bound normal-mode Codex thread id, populated by sidecar
-  // provisioning. Frontend treats `agents[].threadId` as the only source of
-  // truth for "which Codex thread is this agent" — no parallel agent-<id>
-  // LangGraph thread anymore.
-  threadId?: string;
+  // NOTE: no `threadId`. A Codex thread is workspace-scoped; the agent→thread
+  // binding lives per-workspace and is read via `readWorkspaceThreads`, not
+  // from this machine-global team config.
 };
 
 export type Subscription = {
@@ -40,3 +38,9 @@ export type TemplateInfo = {
   displayName: string;
   description: string;
 };
+
+// Per-workspace agent→Codex-thread bindings, read from
+// `<cwd>/.opencrab/threads.json` via `readWorkspaceThreads`. Keyed by agent
+// id; value is the bound Codex thread id. NOT part of the machine-global team
+// config — a Codex thread is workspace-scoped.
+export type WorkspaceThreads = Record<string, string>;

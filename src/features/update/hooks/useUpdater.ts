@@ -22,7 +22,12 @@ export type UpdateState = {
   error?: string;
 };
 
-export type PostUpdateNoticeState = null;
+export type PostUpdateNoticeState = {
+  stage: "loading" | "ready" | "fallback";
+  version: string;
+  htmlUrl: string;
+  body?: string;
+} | null;
 
 const NOOP_STATE: UpdateState = { stage: "idle" };
 

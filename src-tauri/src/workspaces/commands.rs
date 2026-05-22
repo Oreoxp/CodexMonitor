@@ -401,10 +401,12 @@ pub(crate) async fn remove_workspace(
     )
     .await?;
 
-    // Workspace removal succeeded — tear down the OpenCrab state that lived
-    // alongside it: `<cwd>/.opencrab/` plus the user-layer `team.json`.
-    // Runs after core so git `worktree remove` still sees the worktree
-    // dirs under `.opencrab/agents/<id>/worktree/`.
+    // Workspace removal succeeded — tear down the project-layer OpenCrab
+    // state that lived alongside it (`<cwd>/.opencrab/`). The user-layer
+    // `team.json` + `agents/` are machine-global identity and are left
+    // intact on purpose (see `cleanup_workspace_state`). Runs after core so
+    // git `worktree remove` still sees the worktree dirs under
+    // `.opencrab/agents/<id>/worktree/`.
     if let Some(root) = workspace_root {
         crate::bootstrap::cleanup_workspace_state(&root);
     }

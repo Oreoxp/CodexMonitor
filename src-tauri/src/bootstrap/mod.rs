@@ -29,14 +29,17 @@ use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
-use crate::codex::home::{resolve_home_dir, OPENCRAB_HOME_DIR_NAME};
 use crate::team_config::types::AgentConfig;
 
 /// Roster slice type alias. Sidecar/Tauri pass `&[AgentConfig]` directly;
 /// the alias documents intent at call sites.
 pub(crate) type TeamRoster<'a> = &'a [AgentConfig];
 
-const OPENCRAB_DIR: &str = ".opencrab";
+// Step 4: the `.opencrab` literal moved to `crate::paths`. Kept test-only
+// so `bootstrap::tests` keeps compiling without re-introducing the literal
+// into production code.
+#[cfg(test)]
+const OPENCRAB_DIR: &str = crate::paths::OPENCRAB_DIR;
 
 const SOUL_TEMPLATE: &str = "# Soul\n\n";
 const IDENTITY_TEMPLATE: &str = "# Identity\n\n<!-- agent 角色 / 身份 / 跨项目稳定的元信息 -->\n";
@@ -97,18 +100,16 @@ impl BootstrapError {
 // Path resolution
 // ---------------------------------------------------------------------------
 
-/// Resolve `~/.opencrab/` (the user layer root). Errors if $HOME is not set
-/// and no fallback works.
+/// Resolve `~/.opencrab/` (the user layer root). Errors if no home
+/// directory can be resolved. Thin wrapper over [`crate::paths::user_root`].
 pub(crate) fn user_data_dir() -> Result<PathBuf, BootstrapError> {
-    resolve_home_dir()
-        .map(|home| home.join(OPENCRAB_HOME_DIR_NAME))
-        .ok_or(BootstrapError::HomeUnresolved)
+    crate::paths::user_root().ok_or(BootstrapError::HomeUnresolved)
 }
 
 /// Resolve `<cwd>/.opencrab/` (the project layer root). Pure path join — no
-/// IO, no fallibility.
+/// IO, no fallibility. Thin wrapper over [`crate::paths::project_root`].
 pub(crate) fn project_data_dir(cwd: &Path) -> PathBuf {
-    cwd.join(OPENCRAB_DIR)
+    crate::paths::project_root(cwd)
 }
 
 // ---------------------------------------------------------------------------
@@ -144,16 +145,27 @@ pub(crate) fn ensure_user_layer_at(
     roster: TeamRoster<'_>,
 ) -> Result<(), BootstrapError> {
     create_dir_all(root)?;
-    let agents_dir = root.join("agents");
-    create_dir_all(&agents_dir)?;
+    create_dir_all(&crate::paths::user_agents_dir(root))?;
 
     for agent in roster {
-        let agent_dir = agents_dir.join(&agent.id);
+        let agent_dir = crate::paths::user_agent_dir(root, &agent.id);
         create_dir_all(&agent_dir)?;
-        write_template_if_missing(&agent_dir.join("SOUL.md"), SOUL_TEMPLATE)?;
-        write_template_if_missing(&agent_dir.join("IDENTITY.md"), IDENTITY_TEMPLATE)?;
-        write_template_if_missing(&agent_dir.join("USER.md"), USER_TEMPLATE)?;
-        write_template_if_missing(&agent_dir.join("MEMORY.md"), MEMORY_TEMPLATE)?;
+        write_template_if_missing(
+            &crate::paths::user_agent_soul_md(root, &agent.id),
+            SOUL_TEMPLATE,
+        )?;
+        write_template_if_missing(
+            &crate::paths::user_agent_identity_md(root, &agent.id),
+            IDENTITY_TEMPLATE,
+        )?;
+        write_template_if_missing(
+            &crate::paths::user_agent_user_md(root, &agent.id),
+            USER_TEMPLATE,
+        )?;
+        write_template_if_missing(
+            &crate::paths::user_agent_memory_md(root, &agent.id),
+            MEMORY_TEMPLATE,
+        )?;
 
         // Phase 4 Step 1-patch (2026-05-18): the per-agent
         // `codex-home/sessions/` subtree is intentionally NOT created here.
@@ -177,22 +189,26 @@ pub(crate) fn ensure_project_layer_at(
 ) -> Result<(), BootstrapError> {
     create_dir_all(root)?;
 
-    let agents_dir = root.join("agents");
-    create_dir_all(&agents_dir)?;
+    create_dir_all(&crate::paths::project_agents_dir(root))?;
     for agent in roster {
-        let agent_dir = agents_dir.join(&agent.id);
+        let agent_dir = crate::paths::project_agent_dir(root, &agent.id);
         create_dir_all(&agent_dir)?;
-        write_template_if_missing(&agent_dir.join("KANBAN.md"), KANBAN_TEMPLATE)?;
-        create_dir_all(&agent_dir.join("project-memory"))?;
+        write_template_if_missing(
+            &crate::paths::project_agent_kanban_md(root, &agent.id),
+            KANBAN_TEMPLATE,
+        )?;
+        create_dir_all(&crate::paths::project_agent_memory_dir(root, &agent.id))?;
     }
 
-    let team_dir = root.join("team");
-    create_dir_all(&team_dir)?;
-    write_template_if_missing(&team_dir.join("decisions.md"), DECISIONS_TEMPLATE)?;
+    create_dir_all(&crate::paths::project_team_dir(root))?;
+    write_template_if_missing(
+        &crate::paths::project_team_decisions_md(root),
+        DECISIONS_TEMPLATE,
+    )?;
 
-    let teams_dir = root.join("teams").join(team_id);
+    let teams_dir = crate::paths::project_team_events_dir(root, team_id);
     create_dir_all(&teams_dir)?;
-    touch_empty_file_if_missing(&teams_dir.join("events.jsonl"))?;
+    touch_empty_file_if_missing(&crate::paths::project_team_events_jsonl(root, team_id))?;
 
     Ok(())
 }
@@ -267,9 +283,6 @@ fn atomic_write(path: &Path, content: &[u8]) -> Result<(), BootstrapError> {
 // Step 2 — team.json migration (project layer → user layer)
 // ===========================================================================
 
-const TEAM_JSON: &str = "team.json";
-const TEAM_JSON_LEGACY: &str = "team.json.legacy";
-
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum TeamJsonMigrationOutcome {
     /// `~/.opencrab/team.json` already existed; no copy happened. If the
@@ -307,8 +320,8 @@ pub(crate) fn migrate_team_json_at(
     home: &Path,
     cwd: &Path,
 ) -> Result<TeamJsonMigrationOutcome, BootstrapError> {
-    let new_path = home.join(TEAM_JSON);
-    let old_path = cwd.join(OPENCRAB_DIR).join(TEAM_JSON);
+    let new_path = crate::paths::team_json(home);
+    let old_path = crate::paths::project_team_json(&crate::paths::project_root(cwd));
 
     if new_path.exists() {
         if old_path.exists() {
@@ -340,7 +353,7 @@ pub(crate) fn migrate_team_json_at(
 /// Rename `<dir>/team.json` → `<dir>/team.json.legacy`, overwriting any
 /// pre-existing `.legacy` (Step-2 collision policy).
 fn move_to_legacy(old_path: &Path) -> Result<(), BootstrapError> {
-    let legacy = old_path.with_file_name(TEAM_JSON_LEGACY);
+    let legacy = crate::paths::team_json_legacy_sibling(old_path);
     fs::rename(old_path, &legacy).map_err(|err| BootstrapError::io(&legacy, err))
 }
 
@@ -350,7 +363,7 @@ fn move_to_legacy(old_path: &Path) -> Result<(), BootstrapError> {
 
 /// `~/.opencrab/team.json`.
 pub(crate) fn team_json_path() -> Result<PathBuf, BootstrapError> {
-    Ok(user_data_dir()?.join(TEAM_JSON))
+    Ok(crate::paths::team_json(&user_data_dir()?))
 }
 
 /// Atomic write of a team.json payload to the user-layer location. Used by
@@ -361,16 +374,20 @@ pub(crate) fn write_team_json_atomic(content: &[u8]) -> Result<(), BootstrapErro
     atomic_write(&path, content)
 }
 
-/// Tear down OpenCrab state when a workspace is removed: the project-layer
-/// `<cwd>/.opencrab/` tree and the user-layer `~/.opencrab/team.json`.
+/// Tear down a workspace's **project-layer** OpenCrab state when that
+/// workspace is removed: the `<cwd>/.opencrab/` tree, and only that.
 ///
-/// `team.json` is a single machine-wide file (Phase 4 Step 2), so deleting
-/// it here resets team creation for *every* workspace — intentional, since
-/// without this the team picker never reappears once a team exists.
+/// Scoped to the project layer on purpose. `~/.opencrab/team.json` and
+/// `~/.opencrab/agents/` are machine-global identity (Phase 4 Step 2 + the
+/// v3.0 "one team per user, agent identity persists across workspaces"
+/// rule). Workspace removal is a project-layer event and MUST NOT delete
+/// them: doing so re-mints `team_<uuid>` / `agent_<uuid>` ids on the next
+/// Team Mode entry and orphans every `~/.opencrab/agents/<id>/` directory.
+/// See `docs/scratch/storage-identity-audit.md`.
 ///
-/// Best-effort: each failure is logged but never returned. Workspace
-/// removal has already succeeded by the time this runs, so a partial
-/// cleanup must not surface as a removal error.
+/// Best-effort: a failure is logged but never returned. Workspace removal
+/// has already succeeded by the time this runs, so a partial cleanup must
+/// not surface as a removal error.
 pub(crate) fn cleanup_workspace_state(cwd: &Path) {
     let project_dir = project_data_dir(cwd);
     if project_dir.is_dir() {
@@ -379,22 +396,6 @@ pub(crate) fn cleanup_workspace_state(cwd: &Path) {
                 "[opencrab] cleanup: failed to remove {}: {err}",
                 project_dir.display()
             );
-        }
-    }
-
-    match team_json_path() {
-        Ok(team_json) => {
-            if team_json.exists() {
-                if let Err(err) = fs::remove_file(&team_json) {
-                    eprintln!(
-                        "[opencrab] cleanup: failed to remove {}: {err}",
-                        team_json.display()
-                    );
-                }
-            }
-        }
-        Err(err) => {
-            eprintln!("[opencrab] cleanup: cannot resolve team.json path: {err}");
         }
     }
 }

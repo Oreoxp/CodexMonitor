@@ -34,9 +34,6 @@ use serde::Deserialize;
 use super::state_machine::{effects_of, validate_transition, TaskError};
 use super::types::{Task, TaskStatus};
 
-const OPENCRAB_DIR: &str = ".opencrab";
-const STATE_SQLITE: &str = "state.sqlite";
-
 const CREATE_TABLE_SQL: &str = "
 CREATE TABLE IF NOT EXISTS tasks (
     id                   TEXT PRIMARY KEY,
@@ -84,11 +81,11 @@ CREATE INDEX IF NOT EXISTS idx_tasks_plan_id
 /// The sqlite file itself is created by `rusqlite::Connection::open` on first
 /// access; only the parent directory is ensured here.
 pub(crate) fn state_sqlite_path(workspace_root: &Path) -> Result<PathBuf, TaskError> {
-    let dir = workspace_root.join(OPENCRAB_DIR);
+    let dir = crate::paths::project_root(workspace_root);
     if !dir.exists() {
         std::fs::create_dir_all(&dir)?;
     }
-    Ok(dir.join(STATE_SQLITE))
+    Ok(crate::paths::project_state_sqlite(&dir))
 }
 
 // ---------------------------------------------------------------------------

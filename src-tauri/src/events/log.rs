@@ -65,11 +65,10 @@ impl EventLog {
     /// loud failure rather than silently creating an orphan file under
     /// a path the rest of the system doesn't expect.)
     pub(crate) fn open(project_dir: &Path, team_id: &str) -> Result<Self, EventLogError> {
-        let path = project_dir
-            .join(".opencrab")
-            .join("teams")
-            .join(team_id)
-            .join("events.jsonl");
+        let path = crate::paths::project_team_events_jsonl(
+            &crate::paths::project_root(project_dir),
+            team_id,
+        );
         let file = OpenOptions::new()
             .append(true)
             .create(false)

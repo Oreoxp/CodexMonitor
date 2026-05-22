@@ -35,11 +35,11 @@ pub(crate) struct AgentConfig {
     pub(crate) model: String,
     pub(crate) system_prompt_template: String,
     pub(crate) tools_preset: ToolsPreset,
-    /// Phase 2 pivot: bound normal-mode Codex thread id. Optional because
-    /// templates and freshly-created teams omit it; sidecar provisions and
-    /// writes it back at init.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub(crate) thread_id: Option<String>,
+    // NOTE: no `thread_id` field. A Codex thread is workspace-scoped; the
+    // agent→thread binding lives per-workspace at
+    // `<cwd>/.opencrab/threads.json`, not in this machine-global team.json.
+    // serde ignores the legacy `threadId` key on old files (no
+    // `deny_unknown_fields`); the next write drops it.
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

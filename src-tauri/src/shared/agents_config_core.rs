@@ -83,7 +83,7 @@ pub(crate) struct DeleteAgentInput {
 
 pub(crate) fn get_agents_settings_core() -> Result<AgentsSettingsDto, String> {
     let codex_home = resolve_codex_home()?;
-    let config_path = codex_home.join("config.toml");
+    let config_path = crate::paths::config_toml(&codex_home);
     let config_path_string = config_path
         .to_str()
         .ok_or_else(|| "Unable to resolve OPENCRAB_HOME".to_string())?

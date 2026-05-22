@@ -37,8 +37,6 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 const PROJECT_HASH_LEN_HEX: usize = 12;
-const TEAM_SESSIONS_DIR: &str = "team_sessions";
-const OPENCRAB_HOME_DIR_NAME: &str = ".opencrab";
 
 #[derive(Debug)]
 pub(crate) enum CodexSpawnError {
@@ -87,27 +85,14 @@ impl std::fmt::Display for CodexSpawnError {
 
 impl std::error::Error for CodexSpawnError {}
 
-/// Resolve `$HOME` (or `$USERPROFILE` on Windows) and return
-/// `<home>/.opencrab/`. Standalone variant: duplicates a small slice of
-/// `bootstrap::user_data_dir` so this module stays daemon-binary
-/// friendly (the daemon binary does NOT compile the `bootstrap`
-/// module). Kept in sync with `crate::codex::home::resolve_home_dir`
-/// by relying on the same env-var precedence (`HOME` then
-/// `USERPROFILE`).
+/// Resolve `~/.opencrab/` (the user layer root). Step 4: this is now a thin
+/// wrapper over [`crate::paths::user_root`]. The former standalone
+/// `HOME`/`USERPROFILE` copy (which lacked `resolve_home_dir`'s `getpwuid`
+/// fallback) was merged away — so a daemon environment that does not export
+/// `HOME` now resolves the rollout dir correctly instead of leaking
+/// rollouts into `~/.codex/sessions/`.
 fn user_data_dir() -> Result<PathBuf, CodexSpawnError> {
-    if let Some(home) = std::env::var_os("HOME") {
-        let path = PathBuf::from(home);
-        if !path.as_os_str().is_empty() {
-            return Ok(path.join(OPENCRAB_HOME_DIR_NAME));
-        }
-    }
-    if let Some(profile) = std::env::var_os("USERPROFILE") {
-        let path = PathBuf::from(profile);
-        if !path.as_os_str().is_empty() {
-            return Ok(path.join(OPENCRAB_HOME_DIR_NAME));
-        }
-    }
-    Err(CodexSpawnError::HomeUnresolved)
+    crate::paths::user_root().ok_or(CodexSpawnError::HomeUnresolved)
 }
 
 /// `SHA-256(canonical(cwd))[:12 hex chars]`.
@@ -155,7 +140,7 @@ pub(crate) fn team_session_dir_for_workspace(
     cwd: &Path,
 ) -> Result<PathBuf, CodexSpawnError> {
     let hash = project_hash(cwd)?;
-    Ok(user_data_dir.join(TEAM_SESSIONS_DIR).join(hash))
+    Ok(crate::paths::workspace_rollout_dir(user_data_dir, &hash))
 }
 
 /// `team_session_dir_for_workspace` + `mkdir -p`. Call this immediately
@@ -277,12 +262,12 @@ pub(crate) fn agent_team_session_dir(
         reason: err,
     })?;
     let hash = project_hash(cwd)?;
-    Ok(user_data_dir
-        .join("agents")
-        .join(agent_id)
-        .join(TEAM_SESSIONS_DIR)
-        .join(team_id)
-        .join(hash))
+    Ok(crate::paths::agent_rollout_dir(
+        user_data_dir,
+        agent_id,
+        team_id,
+        &hash,
+    ))
 }
 
 /// `agent_team_session_dir` + `mkdir -p`. Call before constructing the

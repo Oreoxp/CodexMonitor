@@ -81,7 +81,7 @@ fn write_feature_flag(key: &str, enabled: bool) -> Result<(), String> {
 }
 
 pub(crate) fn config_toml_path() -> Option<PathBuf> {
-    resolve_default_codex_home().map(|home| home.join("config.toml"))
+    resolve_default_codex_home().map(|home| crate::paths::config_toml(&home))
 }
 
 pub(crate) fn read_config_model(codex_home: Option<PathBuf>) -> Result<Option<String>, String> {

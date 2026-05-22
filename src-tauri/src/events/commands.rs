@@ -40,11 +40,7 @@ async fn workspace_root(state: &AppState, workspace_id: &str) -> Result<PathBuf,
 }
 
 fn events_path(workspace_root: &Path, team_id: &str) -> PathBuf {
-    workspace_root
-        .join(".opencrab")
-        .join("teams")
-        .join(team_id)
-        .join("events.jsonl")
+    crate::paths::project_team_events_jsonl(&crate::paths::project_root(workspace_root), team_id)
 }
 
 pub(crate) fn list_team_events_at_path(

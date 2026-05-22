@@ -13,10 +13,11 @@
 // only used to resolve `cwd` for the migration check; once migration is
 // settled the file lives at the user layer regardless of workspace.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::bootstrap::{migrate_team_json, team_json_path, write_team_json_atomic, BootstrapError};
@@ -143,3 +144,118 @@ pub(crate) fn migrate_team_json_for_workspace(workspace_root: &Path) -> Result<(
 // `#[tauri::command]` async fns that resolve workspace_id from
 // `AppState`, so they're exercised by integration tests / smoke runs
 // rather than unit tests in this module.
+
+// ---------------------------------------------------------------------------
+// Per-workspace agent → Codex-thread bindings (`<cwd>/.opencrab/threads.json`)
+// ---------------------------------------------------------------------------
+//
+// A Codex thread is workspace-scoped (its rollout lives under one workspace's
+// session dir) and rotates, so the agent→thread binding lives in the project
+// layer — NOT in the machine-global `~/.opencrab/team.json`. The sidecar's
+// `provisionAndStartRouter` is the sole writer; this is the frontend's read
+// path for the resume flow (`useActiveTeamAgent`).
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceThreadsFile {
+    /// `agent_id` → bound Codex `thread_id`.
+    #[serde(default)]
+    threads: HashMap<String, String>,
+}
+
+/// Read `<workspace_root>/.opencrab/threads.json` → `agent_id → thread_id`.
+///
+/// Graceful degradation, because the frontend polls this command:
+///   * absent file → empty map (no agent provisioned in this workspace yet —
+///     a normal first-run state).
+///   * parse failure (a torn read racing the sidecar's write, or a corrupt
+///     file) → empty map + a stderr warning. Never panics, never returns the
+///     parse error to the caller — the poll simply retries and the sidecar
+///     re-writes a valid file.
+///
+/// A raw filesystem read error (after the existence check) is the one case
+/// still surfaced as `Err`: that is a genuine FS fault, not a torn read.
+fn read_workspace_threads_at(workspace_root: &Path) -> Result<HashMap<String, String>, String> {
+    let path = crate::paths::project_threads_json(&crate::paths::project_root(workspace_root));
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let raw =
+        std::fs::read_to_string(&path).map_err(|err| format!("read {}: {err}", path.display()))?;
+    match serde_json::from_str::<WorkspaceThreadsFile>(&raw) {
+        Ok(parsed) => Ok(parsed.threads),
+        Err(err) => {
+            eprintln!(
+                "[team_config] threads.json parse failed at {}: {err}; treating as empty",
+                path.display()
+            );
+            Ok(HashMap::new())
+        }
+    }
+}
+
+/// Tauri command — per-workspace `agent_id → thread_id` bindings. Replaces the
+/// old "read `agents[].threadId` out of team.json" path now that thread ids
+/// are workspace-scoped.
+#[tauri::command]
+pub(crate) async fn read_workspace_threads(
+    workspace_id: String,
+    state: State<'_, AppState>,
+) -> Result<HashMap<String, String>, String> {
+    // TODO(remote): branch on remote_backend::is_remote_mode and proxy via RPC.
+    let root = workspace_root(&state, &workspace_id).await?;
+    read_workspace_threads_at(&root)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_workspace_threads_at;
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    /// Seed `<cwd>/.opencrab/threads.json` with `body` (mirrors what the
+    /// sidecar's `writeThreadBindings` produces).
+    fn seed_threads_json(cwd: &Path, body: &str) {
+        let dir = crate::paths::project_root(cwd);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(crate::paths::project_threads_json(&dir), body).unwrap();
+    }
+
+    #[test]
+    fn read_workspace_threads_absent_file_returns_empty_map() {
+        // A workspace that never provisioned an agent has no threads.json —
+        // a normal first-run state, not an error.
+        let cwd = tempdir().unwrap();
+        let threads = read_workspace_threads_at(cwd.path()).unwrap();
+        assert!(threads.is_empty(), "absent threads.json must read as empty");
+    }
+
+    #[test]
+    fn read_workspace_threads_is_isolated_per_workspace() {
+        let cwd_a = tempdir().unwrap();
+        let cwd_b = tempdir().unwrap();
+        seed_threads_json(
+            cwd_a.path(),
+            r#"{"schemaVersion":1,"threads":{"agent_alice":"thread_a"}}"#,
+        );
+        seed_threads_json(
+            cwd_b.path(),
+            r#"{"schemaVersion":1,"threads":{"agent_alice":"thread_b"}}"#,
+        );
+
+        let a = read_workspace_threads_at(cwd_a.path()).unwrap();
+        let b = read_workspace_threads_at(cwd_b.path()).unwrap();
+        assert_eq!(a.get("agent_alice").map(String::as_str), Some("thread_a"));
+        assert_eq!(b.get("agent_alice").map(String::as_str), Some("thread_b"));
+        assert_ne!(a, b, "each workspace must keep its own threads.json");
+    }
+
+    #[test]
+    fn read_workspace_threads_corrupt_file_degrades_to_empty() {
+        // A torn read / corrupt threads.json degrades to an empty map —
+        // never panics, never surfaces a parse error to the caller.
+        let cwd = tempdir().unwrap();
+        seed_threads_json(cwd.path(), "{ this is not valid json");
+        let threads = read_workspace_threads_at(cwd.path()).unwrap();
+        assert!(threads.is_empty(), "corrupt threads.json must read as empty");
+    }
+}

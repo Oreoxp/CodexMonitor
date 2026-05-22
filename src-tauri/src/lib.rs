@@ -27,6 +27,7 @@ mod menu;
 #[path = "menu_mobile.rs"]
 mod menu;
 mod notifications;
+mod paths;
 mod prompts;
 mod remote_backend;
 mod rules;
@@ -245,6 +246,7 @@ pub fn run() {
             workspaces::update_workspace_settings,
             workspaces::set_workspace_runtime_codex_args,
             team_config::read_team_config,
+            team_config::read_workspace_threads,
             team_config::create_team_from_template,
             team_config::list_templates,
             tasks::list_tasks,

@@ -53,11 +53,7 @@ impl std::fmt::Display for KanbanError {
 impl std::error::Error for KanbanError {}
 
 fn kanban_path(project_dir: &Path, agent_id: &str) -> PathBuf {
-    project_dir
-        .join(".opencrab")
-        .join("agents")
-        .join(agent_id)
-        .join("KANBAN.md")
+    crate::paths::project_agent_kanban_md(&crate::paths::project_root(project_dir), agent_id)
 }
 
 /// Render + atomic-write a single agent's KANBAN.md.

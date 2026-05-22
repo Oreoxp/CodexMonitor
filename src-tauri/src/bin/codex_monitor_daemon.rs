@@ -23,6 +23,9 @@ mod file_ops;
 mod file_policy;
 #[path = "../git_utils.rs"]
 mod git_utils;
+#[allow(dead_code)]
+#[path = "../paths.rs"]
+mod paths;
 #[path = "codex_monitor_daemon/rpc.rs"]
 mod rpc;
 #[path = "../rules.rs"]

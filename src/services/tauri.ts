@@ -1255,6 +1255,18 @@ export async function readTeamConfig(workspaceId: string): Promise<TeamConfig | 
   return invoke<TeamConfig | null>("read_team_config", { workspaceId });
 }
 
+// Per-workspace agent→Codex-thread bindings (`<cwd>/.opencrab/threads.json`).
+// Thread ids are workspace-scoped, so they live here rather than in the
+// machine-global team config. Returns `{}` when no agent has been provisioned
+// in this workspace yet. This is the resume path's read source.
+export async function readWorkspaceThreads(
+  workspaceId: string,
+): Promise<Record<string, string>> {
+  return invoke<Record<string, string>>("read_workspace_threads", {
+    workspaceId,
+  });
+}
+
 export async function createTeamFromTemplate(
   workspaceId: string,
   templateId: string,
@@ -1282,11 +1294,12 @@ export async function stopSidecar(workspaceId: string): Promise<void> {
 // Codex thread; sidecar is no longer in the user-send path.
 //
 // This kicks the sidecar to (1) provision a Codex thread per agent that
-// doesn't already have one (writing `agents[].threadId` back into team.json),
-// and (2) ask the Tauri host to start its team router (permanent per-thread
-// taps + `<send_message>` tag dispatcher). Idempotent — safe to retry.
-// Frontend calls this once after `start_sidecar` succeeds, then polls
-// `read_team_config` until each agent has a `threadId`.
+// doesn't already have one (persisting the agent→thread bindings to the
+// per-workspace `<cwd>/.opencrab/threads.json`), and (2) ask the Tauri host
+// to start its team router (permanent per-thread taps + `<send_message>` tag
+// dispatcher). Idempotent — safe to retry. Frontend calls this once after
+// `start_sidecar` succeeds, then polls `read_workspace_threads` until each
+// agent is bound.
 export type SidecarProvisionResult = {
   agents: Array<{ id: string; name: string; threadId: string }>;
 };

@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-import type { TeamConfig } from "../types";
+import type { TeamConfig, WorkspaceThreads } from "../types";
 
 type TeamMemberStripProps = {
   team: TeamConfig;
@@ -12,6 +12,10 @@ type TeamMemberStripProps = {
   // processing indicator post-Phase-2.
   activeAgentId: string | null;
   onSelectAgent: (agentId: string) => void;
+  // Per-workspace agent→Codex-thread bindings (`<cwd>/.opencrab/threads.json`).
+  // An agent with no entry has not been provisioned in this workspace yet —
+  // its chip stays disabled ("Provisioning…") until the binding lands.
+  threadsByAgentId: WorkspaceThreads;
   // Phase 3 Step 4: optional slot at the right edge of the strip for the
   // "Plan review (N)" badge. Keeps the strip the layout owner; consumers
   // (TeamHome) decide what lives there.
@@ -24,6 +28,7 @@ export function TeamMemberStrip({
   team,
   activeAgentId,
   onSelectAgent,
+  threadsByAgentId,
   rightSlot,
 }: TeamMemberStripProps) {
   return (
@@ -32,7 +37,7 @@ export function TeamMemberStrip({
       <div className="team-mode-strip-agents">
         {team.agents.map((agent) => {
           const isActive = agent.id === activeAgentId;
-          const ready = Boolean(agent.threadId);
+          const ready = Boolean(threadsByAgentId[agent.id]);
           return (
             <button
               type="button"

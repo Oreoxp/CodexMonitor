@@ -166,7 +166,9 @@ pub(crate) fn read_settings() -> Result<ModelProviderSettings, String> {
         }
     }
 
-    let config_path = root.join("config.toml").to_string_lossy().to_string();
+    let config_path = crate::paths::config_toml(&root)
+        .to_string_lossy()
+        .to_string();
 
     // Reflect the on-disk migration in the in-memory snapshot so the UI shows
     // the value we just persisted.

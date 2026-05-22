@@ -234,8 +234,9 @@ export default function TeamMainApp() {
         await startSidecar(workspaceId);
         if (cancelled) return;
         // Phase 2 pivot: after the sidecar is up, ask it to provision any
-        // agent missing a `threadId` (writes them back into team.json) and
-        // start the Tauri-side team router. The sidecar retries internally
+        // agent missing a Codex thread in this workspace (persisting the
+        // agent→thread bindings to `<cwd>/.opencrab/threads.json`) and start
+        // the Tauri-side team router. The sidecar retries internally
         // for the `connect_workspace` race (`workspace not connected`); any
         // error reaching this catch is a real failure worth surfacing.
         await sidecarProvision(workspaceId);
@@ -589,7 +590,7 @@ export default function TeamMainApp() {
   // history via the normal-mode resume path (Phase 1.3). `activeThreadId` then
   // *is* the agent thread id — the rest of the normal-mode chat stack
   // (messages / streaming / history) works unchanged off it.
-  const { activeAgentId, selectAgent } = useActiveTeamAgent(
+  const { activeAgentId, selectAgent, threadsByAgentId } = useActiveTeamAgent(
     activeWorkspaceId,
     setActiveThreadId,
     teamReadyVersion,
@@ -1901,6 +1902,7 @@ export default function TeamMainApp() {
       messagesSlot={messagesNode}
       activeAgentId={activeAgentId}
       onSelectAgent={selectAgent}
+      threadsByAgentId={threadsByAgentId}
       onTeamCreated={handleTeamCreated}
       provisionError={provisionError}
       onDismissProvisionError={dismissProvisionError}

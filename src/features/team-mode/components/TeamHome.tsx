@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { readTeamConfig } from "../../../services/tauri";
-import type { TeamConfig } from "../types";
+import type { TeamConfig, WorkspaceThreads } from "../types";
 import { TeamEmptyState } from "./TeamEmptyState";
 import { TeamMemberStrip } from "./TeamMemberStrip";
 import { PlanReviewModal } from "./PlanReviewModal";
@@ -16,6 +16,9 @@ type TeamHomeProps = {
   // lazy-bootstraps a non-correspondent agent's Codex thread + repoints chat.
   activeAgentId: string | null;
   onSelectAgent: (agentId: string) => void | Promise<void>;
+  // Per-workspace agent→Codex-thread bindings, forwarded to the roster strip
+  // for per-chip readiness. Sourced from useActiveTeamAgent.
+  threadsByAgentId: WorkspaceThreads;
   // Phase 2.C composer fix: signal up when the user has just created a team
   // via the empty-state modal so TeamMainApp's sidecar-start effect re-fires.
   onTeamCreated?: () => void;
@@ -32,6 +35,7 @@ export function TeamHome({
   messagesSlot,
   activeAgentId,
   onSelectAgent,
+  threadsByAgentId,
   onTeamCreated,
   provisionError,
   onDismissProvisionError,
@@ -118,6 +122,7 @@ export function TeamHome({
       team={team}
       activeAgentId={activeAgentId}
       onSelectAgent={onSelectAgent}
+      threadsByAgentId={threadsByAgentId}
       messagesSlot={messagesSlot}
       provisionError={provisionError}
       onDismissProvisionError={onDismissProvisionError}
@@ -134,6 +139,7 @@ type TeamHomeReadyProps = {
   team: TeamConfig;
   activeAgentId: string | null;
   onSelectAgent: (agentId: string) => void | Promise<void>;
+  threadsByAgentId: WorkspaceThreads;
   messagesSlot: ReactNode;
   provisionError?: string | null;
   onDismissProvisionError?: () => void;
@@ -144,6 +150,7 @@ function TeamHomeReady({
   team,
   activeAgentId,
   onSelectAgent,
+  threadsByAgentId,
   messagesSlot,
   provisionError,
   onDismissProvisionError,
@@ -160,6 +167,7 @@ function TeamHomeReady({
         team={team}
         activeAgentId={activeAgentId}
         onSelectAgent={onSelectAgent}
+        threadsByAgentId={threadsByAgentId}
         rightSlot={
           <PlanReviewBadge
             queue={approval.queue}

@@ -1,12 +1,14 @@
 // Phase 4 Step 1 — bootstrap module tests.
 //
-// Test isolation: every test uses `tempfile::TempDir` as a synthetic
-// "$HOME" or workspace root, then calls the `*_at` helpers directly so we
-// never write to the real `~/.opencrab/`. The public `ensure_user_layer`
-// /`ensure_project_layer` entry points are deliberately untested here; they
-// are thin wrappers that resolve $HOME / cwd and then call the `*_at`
-// helpers, and exercising them would require mutating `HOME` via
-// `std::env::set_var` which races with other tests.
+// Test isolation: most tests use `tempfile::TempDir` as a synthetic
+// workspace root and call the `*_at` helpers directly, so they never write
+// to the real `~/.opencrab/` and never touch process env. The one
+// exception is `cleanup_workspace_state_spares_machine_global_identity`
+// (storage Step 2 regression guard): `cleanup_workspace_state` is reached
+// only via the `cwd`-driven public API, and the test points `$HOME` at a
+// synthetic user layer to prove the machine-global files survive — it does
+// so under the crate-wide `crate::paths::ENV_LOCK` so it stays race-free
+// against the other env-mutating tests in the binary.
 
 use std::fs;
 use std::path::Path;
@@ -24,7 +26,6 @@ fn agent(id: &str) -> AgentConfig {
         model: "gpt-5".to_string(),
         system_prompt_template: String::new(),
         tools_preset: ToolsPreset::Readonly,
-        thread_id: None,
     }
 }
 
@@ -550,4 +551,97 @@ fn walk(dir: &Path, out: &mut Vec<(std::path::PathBuf, std::time::SystemTime)>) 
             out.push((path, meta.modified().unwrap()));
         }
     }
+}
+
+// -- storage Step 2 regression guards -------------------------------------
+
+#[test]
+fn team_and_agent_ids_are_stable_across_workspaces() {
+    // Storage Step 2: team identity (team_id + agent_ids) is machine-global.
+    // Bootstrapping a second workspace must reuse the existing
+    // `~/.opencrab/team.json`, never re-mint a fresh identity.
+    let home = tempdir().unwrap();
+    let cwd_a = tempdir().unwrap();
+    let cwd_b = tempdir().unwrap();
+    let body = r#"{
+      "schemaVersion": 1,
+      "id": "team_stable_fixture",
+      "name": "Stability Fixture",
+      "createdAt": "2025-01-01T00:00:00Z",
+      "templateId": "pm_plus_one_dev",
+      "agents": [
+        {"id": "agent_alice", "name": "alice", "role": "pm",
+         "model": "gpt-5", "systemPromptTemplate": "", "toolsPreset": "readonly"},
+        {"id": "agent_bob", "name": "bob", "role": "dev",
+         "model": "gpt-5", "systemPromptTemplate": "", "toolsPreset": "readwrite"}
+      ],
+      "subscriptions": []
+    }"#;
+    seed_home_team_json(home.path(), body);
+
+    // "Bootstrap workspace X" = the migration precondition + identity read.
+    let read_identity = |cwd: &Path| -> (String, Vec<String>) {
+        migrate_team_json_at(home.path(), cwd).unwrap();
+        let raw = fs::read_to_string(home_team_json(home.path())).unwrap();
+        let cfg: crate::team_config::types::TeamConfig =
+            serde_json::from_str(&raw).unwrap();
+        (cfg.id, cfg.agents.into_iter().map(|a| a.id).collect())
+    };
+    let (team_a, agents_a) = read_identity(cwd_a.path());
+    let (team_b, agents_b) = read_identity(cwd_b.path());
+
+    assert_eq!(team_a, team_b, "team_id drifted between workspaces");
+    assert_eq!(team_a, "team_stable_fixture", "team_id was re-minted");
+    assert_eq!(agents_a, agents_b, "agent_ids drifted between workspaces");
+    assert_eq!(
+        agents_a,
+        vec!["agent_alice".to_string(), "agent_bob".to_string()],
+        "agent_ids were re-minted",
+    );
+}
+
+#[test]
+fn cleanup_workspace_state_spares_machine_global_identity() {
+    // Storage Step 2: removing a workspace deletes that workspace's project
+    // layer (`<cwd>/.opencrab/`) ONLY. The machine-global
+    // `~/.opencrab/team.json` + `~/.opencrab/agents/` are identity and MUST
+    // survive — re-introducing their deletion is the exact step-2 bug.
+    let _guard = crate::paths::ENV_LOCK.lock().expect("env lock");
+    let home = tempdir().unwrap();
+    let cwd = tempdir().unwrap();
+
+    // Point $HOME at a synthetic user layer — the blast radius a
+    // re-introduced `team.json` deletion would actually hit.
+    let prev_home = std::env::var("HOME").ok();
+    std::env::set_var("HOME", home.path());
+    let user_root = home.path().join(OPENCRAB_DIR);
+    fs::create_dir_all(user_root.join("agents").join("agent_alice")).unwrap();
+    fs::write(user_root.join("team.json"), "{\"id\":\"team_x\"}").unwrap();
+
+    // Populate this workspace's project layer.
+    let project_dir = cwd.path().join(OPENCRAB_DIR);
+    fs::create_dir_all(project_dir.join("agents").join("agent_alice")).unwrap();
+    fs::write(project_dir.join("state.sqlite"), b"sqlite").unwrap();
+
+    cleanup_workspace_state(cwd.path());
+
+    // Capture before restoring $HOME so an assert panic cannot skip restore.
+    let project_layer_gone = !project_dir.exists();
+    let team_json_survives = user_root.join("team.json").exists();
+    let agents_survive = user_root.join("agents").join("agent_alice").exists();
+
+    match prev_home {
+        Some(v) => std::env::set_var("HOME", v),
+        None => std::env::remove_var("HOME"),
+    }
+
+    assert!(project_layer_gone, "cleanup must delete <cwd>/.opencrab/");
+    assert!(
+        team_json_survives,
+        "cleanup must NOT delete the machine-global ~/.opencrab/team.json",
+    );
+    assert!(
+        agents_survive,
+        "cleanup must NOT delete the machine-global ~/.opencrab/agents/",
+    );
 }
