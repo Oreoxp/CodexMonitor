@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "team_eval_pm_ambiguous",
+  "name": "PM ambiguous request",
+  "createdAt": "2026-01-01T00:00:00.000Z",
+  "templateId": "eval_solo_pm",
+  "agents": [
+    {
+      "id": "agent_pm",
+      "name": "Alice",
+      "role": "pm",
+      "model": "qwen3.5-plus",
+      "systemPromptTemplate": "",
+      "toolsPreset": "full"
+    }
+  ],
+  "subscriptions": [
+    { "publisher": "user", "subscribers": ["agent_pm"], "channels": ["chat"] },
+    { "publisher": "agent_pm", "subscribers": ["user"], "channels": ["chat"] }
+  ]
+}

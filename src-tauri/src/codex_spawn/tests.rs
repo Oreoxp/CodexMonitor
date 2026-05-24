@@ -6,8 +6,9 @@ use std::path::Path;
 use tempfile::tempdir;
 
 use super::{
-    agent_team_session_dir, ensure_agent_team_session_dir, ensure_team_session_dir, project_hash,
-    team_session_dir_for_workspace, CodexSpawnError, PROJECT_HASH_LEN_HEX,
+    agent_team_session_dir, build_memory_mcp_server_entry, ensure_agent_team_session_dir,
+    ensure_team_session_dir, project_hash, team_session_dir_for_workspace, CodexSpawnError,
+    PROJECT_HASH_LEN_HEX,
 };
 
 // ---------------------------------------------------------------------------
@@ -291,4 +292,58 @@ fn ensure_agent_team_session_dir_propagates_validation_error() {
             ..
         }
     ));
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5 Step 2 — build_memory_mcp_server_entry
+// ---------------------------------------------------------------------------
+
+#[test]
+fn build_memory_mcp_server_entry_bakes_agent_id_and_memory_dir() {
+    let binary = Path::new("/opt/bin/opencrab-memory-mcp");
+    let entry = build_memory_mcp_server_entry(binary, "alice", Path::new("/ws"))
+        .expect("entry builds for a valid agent id");
+
+    // `command` is the resolved binary path.
+    assert_eq!(entry["command"], binary.display().to_string());
+
+    // `args` carry the agent id + the agent's own project-memory directory,
+    // so each agent's spawned server is scoped to exactly its own memory.
+    let expected_dir = Path::new("/ws")
+        .join(".opencrab")
+        .join("agents")
+        .join("alice")
+        .join("project-memory")
+        .display()
+        .to_string();
+    assert_eq!(
+        entry["args"],
+        serde_json::json!(["--agent-id", "alice", "--memory-dir", expected_dir]),
+    );
+}
+
+#[test]
+fn build_memory_mcp_server_entry_scopes_distinct_agents_to_distinct_dirs() {
+    let binary = Path::new("/opt/bin/opencrab-memory-mcp");
+    let alice = build_memory_mcp_server_entry(binary, "alice", Path::new("/ws")).unwrap();
+    let bob = build_memory_mcp_server_entry(binary, "bob", Path::new("/ws")).unwrap();
+    assert_ne!(alice["args"], bob["args"]);
+}
+
+#[test]
+fn build_memory_mcp_server_entry_rejects_path_traversal_agent_id() {
+    let binary = Path::new("/opt/bin/opencrab-memory-mcp");
+    for evil in ["../escape", "a/b", "..", "."] {
+        let err = build_memory_mcp_server_entry(binary, evil, Path::new("/ws")).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CodexSpawnError::InvalidId {
+                    kind: "agent_id",
+                    ..
+                }
+            ),
+            "expected InvalidId for {evil:?}, got {err}",
+        );
+    }
 }

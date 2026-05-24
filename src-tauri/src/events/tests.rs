@@ -554,6 +554,7 @@ fn full_task_lifecycle_emits_six_ordered_events() {
             TeamEventBody::TaskDone { .. } => "task_done",
             TeamEventBody::TaskRejected { .. } => "task_rejected",
             TeamEventBody::TaskArchived { .. } => "task_archived",
+            TeamEventBody::MemoryFlush { .. } => "memory_flush",
         })
         .collect();
     assert_eq!(

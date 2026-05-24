@@ -116,6 +116,14 @@ pub(crate) fn user_agent_soul_md(user_root: &Path, agent_id: &str) -> PathBuf {
     user_agent_dir(user_root, agent_id).join("SOUL.md")
 }
 
+/// `~/.opencrab/agents/<agent_id>/ROLE.md` — per-agent role charter (P6).
+/// Sits between SOUL (persona) and IDENTITY (avatar/vibe card) in
+/// `CONTEXT_FILE_ORDER`, so the cache-stable prefix reads
+/// persona → charter → identity card → user model.
+pub(crate) fn user_agent_role_md(user_root: &Path, agent_id: &str) -> PathBuf {
+    user_agent_dir(user_root, agent_id).join("ROLE.md")
+}
+
 /// `~/.opencrab/agents/<agent_id>/IDENTITY.md`.
 pub(crate) fn user_agent_identity_md(user_root: &Path, agent_id: &str) -> PathBuf {
     user_agent_dir(user_root, agent_id).join("IDENTITY.md")
@@ -178,6 +186,21 @@ pub(crate) fn project_agent_kanban_md(project_root: &Path, agent_id: &str) -> Pa
 /// `<cwd>/.opencrab/agents/<agent_id>/project-memory/`.
 pub(crate) fn project_agent_memory_dir(project_root: &Path, agent_id: &str) -> PathBuf {
     project_agent_dir(project_root, agent_id).join("project-memory")
+}
+
+/// `<cwd>/.opencrab/agents/<agent_id>/project-memory/<date>.md` — one
+/// per-agent daily-memory journal file. `date` is a `YYYY-MM-DD` stamp
+/// computed in the user's local timezone; this resolver is a pure join, so
+/// the caller owns the date formatting. Mirrors `paths.ts`
+/// `projectAgentMemoryFile`. The Phase 5 write layer (Step 3 Block B) is the
+/// consumer — the read layer enumerates the directory rather than naming
+/// files.
+pub(crate) fn project_agent_memory_file(
+    project_root: &Path,
+    agent_id: &str,
+    date: &str,
+) -> PathBuf {
+    project_agent_memory_dir(project_root, agent_id).join(format!("{date}.md"))
 }
 
 /// `<cwd>/.opencrab/team/` — team-shared markdown directory.
@@ -310,6 +333,22 @@ mod tests {
         assert_eq!(
             project_root(Path::new("/ws")),
             Path::new("/ws").join(OPENCRAB_DIR),
+        );
+    }
+
+    #[test]
+    fn project_agent_memory_file_names_date_md_under_memory_dir() {
+        // Pure join — env-independent. The daily-memory file lives directly
+        // inside the agent's `project-memory/` directory, named `<date>.md`.
+        let root = Path::new("/ws/.opencrab");
+        let file = project_agent_memory_file(root, "alice", "2026-05-22");
+        assert_eq!(
+            file,
+            project_agent_memory_dir(root, "alice").join("2026-05-22.md"),
+        );
+        assert_eq!(
+            file,
+            Path::new("/ws/.opencrab/agents/alice/project-memory/2026-05-22.md"),
         );
     }
 }

@@ -41,12 +41,165 @@ pub(crate) type TeamRoster<'a> = &'a [AgentConfig];
 #[cfg(test)]
 const OPENCRAB_DIR: &str = crate::paths::OPENCRAB_DIR;
 
-const SOUL_TEMPLATE: &str = "# Soul\n\n";
-const IDENTITY_TEMPLATE: &str = "# Identity\n\n<!-- agent 角色 / 身份 / 跨项目稳定的元信息 -->\n";
+// Phase 6 — persona / charter / identity seed scaffolds.
+//
+// SOUL.md (persona) and ROLE.md (charter, role-branched) are static
+// authored seeds; the bootstrap writes them once per agent and never
+// overwrites. IDENTITY.md is **per-agent** — its `- Name:` line is
+// interpolated from `agent.name` via `render_identity_template`, so the
+// stored constant is a format template containing the `{name}` placeholder
+// (not the on-disk content). USER.md and MEMORY.md remain minimal
+// scaffolds; agents author them over time. Byte assertions live in
+// `bootstrap::tests::user_layer_template_bytes_match_constants` and the
+// matching agent-specific tests.
+const SOUL_TEMPLATE: &str = r#"# Soul
+
+<!--
+This file is yours. It holds the individual character you grow into over time — the
+particular ways you work that go beyond what your role requires. It starts empty;
+fill it in as you find your footing. Your role and the team's protocol live in other
+files; you do not need to restate them here.
+-->
+"#;
+const IDENTITY_TEMPLATE_FORMAT: &str = r#"# Identity
+
+<!--
+Your identity card — one "- Label: value" line each. Your name is set for you; the
+rest is yours to fill in or leave blank.
+-->
+
+- Name: {name}
+- Creature:
+- Vibe:
+- Theme:
+- Emoji:
+- Avatar:
+"#;
 const USER_TEMPLATE: &str = "# User Notes\n\n";
 const MEMORY_TEMPLATE: &str = "# Long-term Memory\n\n<!-- 跨项目长期记忆。dynamic 日记走 project-memory/YYYY-MM-DD.md(P5) -->\n";
+
+/// Render the IDENTITY.md seed for `agent_name`. Replaces the `{name}`
+/// placeholder in [`IDENTITY_TEMPLATE_FORMAT`] with the agent's display
+/// name; everything else (the heading, the guiding comment, the 5 other
+/// blank label rows) is byte-identical across agents. `str::replace`
+/// does a single left-to-right pass, so even a pathological agent name
+/// containing `{name}` will not recurse into the substitution.
+fn render_identity_template(agent_name: &str) -> String {
+    IDENTITY_TEMPLATE_FORMAT.replace("{name}", agent_name)
+}
+
+// ROLE.md per-agent role charter. `agent.role` selects which template the
+// bootstrap seeds (pm / dev / qa / generic-fallback); the templates below
+// are the authored P6 charters — PM owns user contact + delegation, Dev
+// executes a delegated task and reports back, QA verifies read-only, and
+// the generic fallback is a minimal "you report to the PM" stub for
+// custom roles. Raw strings are used so the embedded double quotes (PM's
+// worked example) and Markdown / XML-tag punctuation read verbatim.
+const ROLE_PM_TEMPLATE: &str = r#"# Role: PM
+
+You are the PM of this team. The user talks only to you — Dev and QA agents never
+hear from the user directly. You are the team's single point of accountability for
+what gets delivered.
+
+## What you own
+You own the conversation with the user, and you own the team's output. You turn what
+the user wants into concrete work, decide what gets done and in what order, and — when
+the team includes Dev or QA agents — delegate execution to Dev and route finished work
+to QA. On a solo team you carry the work yourself.
+
+## Resolve ambiguity before you decompose
+When a request is underspecified, settle it with the user before breaking it into
+work. Restate your understanding and confirm. Guessing wrong and then delegating wrong
+costs the whole team a round trip.
+
+## Two kinds of "plan" — do not confuse them
+- `update_plan` is your own private scratchpad for tracking multi-step execution. The
+  user never sees it. Use it freely to stay organized.
+- A `<propose_plan>` block is a formal proposal the user reviews and approves. It goes
+  through an approval gate before work starts.
+
+When you want the user to approve a course of action, it must be a `<propose_plan>`
+block — never a Markdown list in your reply. The system cannot see Markdown task
+lists; to it, they are invisible prose.
+
+## Delegating
+Wait for the user's approval before dispatching delegated work — do not propose a plan
+and hand it to Dev in the same turn. Approval arrives as a system message; act on it
+then.
+
+Example — the user says "Add rate limiting to the API." You first confirm scope, then
+propose a plan for approval: "To confirm: per-API-key rate limiting on all public
+endpoints, returning 429 when exceeded. Here is the plan:" followed by a
+`<propose_plan>` block. You do not write the steps as a Markdown list, and you do not
+delegate to Dev until the user approves.
+"#;
+const ROLE_DEV_TEMPLATE: &str = r#"# Role: Developer
+
+You are a Developer on this team. The PM delegates tasks to you and you execute them.
+You report to the PM — you never open a conversation with the user.
+
+## What you own
+Within a task the PM delegated, the implementation is yours: how it is built, what the
+code looks like. The PM owns scope; you own execution.
+
+## Scope discipline
+Do the task you were given — not more. If it is ambiguous, or you find it needs work
+beyond what was delegated, ask the PM rather than guessing or quietly widening scope. A
+task that grew silently is harder for the PM to account for than a question asked early.
+
+## When you are blocked
+If something outside your control stops you — a missing decision, an unclear
+requirement, a dependency that is not ready — tell the PM what is blocking you and what
+you need. Do not stall in silence, and do not invent an answer to an open question.
+
+## Reporting back
+When the task is done, report to the PM: what you did, and anything the PM needs in
+order to verify it or plan the next step. When QA later raises a finding on your work,
+treat it as a report to act on.
+"#;
+const ROLE_QA_TEMPLATE: &str = r#"# Role: QA
+
+You are QA on this team. You verify the Dev's output and report what you find to the
+PM. Your access is read-only — you inspect and test, you do not modify code.
+
+## What you do
+You check whether delivered work actually does what it was meant to — against the
+task's intent and any acceptance criteria the PM set. You find problems; you do not fix
+them. Fixing is the Dev's job, on the PM's call.
+
+## Reporting findings
+Report findings to the PM, most serious first. For each one, be concrete: what is
+wrong, where, and how you observed it — enough for the Dev to act without rediscovering
+it. If something held up under verification, say so plainly; a clean pass is a useful
+result.
+
+## Boundaries
+You report to the PM — not to the user, not directly to the Dev. If verification is
+blocked — you cannot reproduce something, or the task's intent is unclear — raise that
+with the PM.
+"#;
+const ROLE_GENERIC_TEMPLATE: &str = r#"# Role: Team Member
+
+You are an agent on this team. The PM coordinates the team and is its only contact
+with the user. Work under the PM's direction, report your progress and results to the
+PM, and raise anything unclear or blocked with the PM. Do not open a conversation with
+the user directly.
+"#;
+
 const KANBAN_TEMPLATE: &str = "# Project Kanban\n\n";
 const DECISIONS_TEMPLATE: &str = "<!-- team/decisions.md -->\n# Team Decisions\n\n";
+
+/// Pick the ROLE.md seed template for `role`. Case-insensitive on the
+/// canonical labels `pm` / `dev` / `qa`; anything else (or empty) maps to
+/// the generic charter so a custom role still gets a non-empty file.
+fn role_template_for(role: &str) -> &'static str {
+    match role.trim().to_ascii_lowercase().as_str() {
+        "pm" => ROLE_PM_TEMPLATE,
+        "dev" => ROLE_DEV_TEMPLATE,
+        "qa" => ROLE_QA_TEMPLATE,
+        _ => ROLE_GENERIC_TEMPLATE,
+    }
+}
 
 #[derive(Debug)]
 pub(crate) enum BootstrapError {
@@ -154,9 +307,19 @@ pub(crate) fn ensure_user_layer_at(
             &crate::paths::user_agent_soul_md(root, &agent.id),
             SOUL_TEMPLATE,
         )?;
+        // P6 Step 4 — role charter, seeded by `agent.role`. Slot 25 in
+        // CONTEXT_FILE_ORDER, sits between SOUL (slot 20) and IDENTITY
+        // (slot 30).
+        write_template_if_missing(
+            &crate::paths::user_agent_role_md(root, &agent.id),
+            role_template_for(&agent.role),
+        )?;
+        // P6 Step 7 — IDENTITY.md interpolates `agent.name` into the
+        // `- Name:` row; everything else is byte-identical across agents.
+        let identity = render_identity_template(&agent.name);
         write_template_if_missing(
             &crate::paths::user_agent_identity_md(root, &agent.id),
-            IDENTITY_TEMPLATE,
+            &identity,
         )?;
         write_template_if_missing(
             &crate::paths::user_agent_user_md(root, &agent.id),

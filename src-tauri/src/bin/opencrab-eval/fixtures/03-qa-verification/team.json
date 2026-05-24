@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "team_eval_qa",
+  "name": "QA verification",
+  "createdAt": "2026-01-01T00:00:00.000Z",
+  "templateId": "eval_solo_qa",
+  "agents": [
+    {
+      "id": "agent_qa",
+      "name": "Dave",
+      "role": "qa",
+      "model": "qwen3.5-plus",
+      "systemPromptTemplate": "",
+      "toolsPreset": "readonly"
+    }
+  ],
+  "subscriptions": [
+    { "publisher": "user", "subscribers": ["agent_qa"], "channels": ["chat"] },
+    { "publisher": "agent_qa", "subscribers": ["user"], "channels": ["chat"] }
+  ]
+}

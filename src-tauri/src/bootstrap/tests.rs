@@ -19,10 +19,14 @@ use super::*;
 use crate::team_config::types::{AgentConfig, ToolsPreset};
 
 fn agent(id: &str) -> AgentConfig {
+    agent_with_role(id, "pm")
+}
+
+fn agent_with_role(id: &str, role: &str) -> AgentConfig {
     AgentConfig {
         id: id.to_string(),
         name: id.to_string(),
-        role: "pm".to_string(),
+        role: role.to_string(),
         model: "gpt-5".to_string(),
         system_prompt_template: String::new(),
         tools_preset: ToolsPreset::Readonly,
@@ -59,7 +63,14 @@ fn user_layer_fresh_state_creates_dirs_and_templates() {
         let agent_dir = home.path().join("agents").join(id);
         assert_dir(&agent_dir);
         assert_file(&agent_dir.join("SOUL.md"), SOUL_TEMPLATE);
-        assert_file(&agent_dir.join("IDENTITY.md"), IDENTITY_TEMPLATE);
+        // P6 Step 4 — ROLE.md is seeded per agent.role; the helper above
+        // builds both agents with `role = "pm"`, so both get the PM seed.
+        assert_file(&agent_dir.join("ROLE.md"), ROLE_PM_TEMPLATE);
+        // P6 Step 7 — IDENTITY.md interpolates `agent.name`; `agent(id)`
+        // builds the fixture with `name == id`, so the rendered template
+        // for each iteration uses that id as the agent's name.
+        let identity = render_identity_template(id);
+        assert_file(&agent_dir.join("IDENTITY.md"), &identity);
         assert_file(&agent_dir.join("USER.md"), USER_TEMPLATE);
         assert_file(&agent_dir.join("MEMORY.md"), MEMORY_TEMPLATE);
     }
@@ -120,9 +131,10 @@ fn user_layer_preserves_pre_existing_content() {
         orphan_marker,
     );
     // Missing templates should be seeded alongside the preserved one.
+    let alice_identity = render_identity_template("alice");
     assert_file(
         &home.path().join("agents/alice/IDENTITY.md"),
-        IDENTITY_TEMPLATE,
+        &alice_identity,
     );
     assert_file(&home.path().join("agents/alice/USER.md"), USER_TEMPLATE);
     assert_file(&home.path().join("agents/alice/MEMORY.md"), MEMORY_TEMPLATE);
@@ -173,8 +185,12 @@ fn user_layer_template_bytes_match_constants() {
         SOUL_TEMPLATE,
     );
     assert_eq!(
+        fs::read_to_string(home.path().join("agents/alice/ROLE.md")).unwrap(),
+        ROLE_PM_TEMPLATE,
+    );
+    assert_eq!(
         fs::read_to_string(home.path().join("agents/alice/IDENTITY.md")).unwrap(),
-        IDENTITY_TEMPLATE,
+        render_identity_template("alice"),
     );
     assert_eq!(
         fs::read_to_string(home.path().join("agents/alice/USER.md")).unwrap(),
@@ -183,6 +199,94 @@ fn user_layer_template_bytes_match_constants() {
     assert_eq!(
         fs::read_to_string(home.path().join("agents/alice/MEMORY.md")).unwrap(),
         MEMORY_TEMPLATE,
+    );
+}
+
+#[test]
+fn user_layer_writes_role_md_per_agent_role() {
+    // P6 Step 4 — bootstrap selects the ROLE.md seed via `role_template_for`.
+    // Pins the four branches: pm / dev / qa / generic-fallback.
+    let home = tempdir().unwrap();
+    let roster = [
+        agent_with_role("alice", "pm"),
+        agent_with_role("bob", "dev"),
+        agent_with_role("dave", "qa"),
+        agent_with_role("eve", "custom-research"),
+    ];
+
+    ensure_user_layer_at(home.path(), &roster).unwrap();
+
+    assert_file(
+        &home.path().join("agents/alice/ROLE.md"),
+        ROLE_PM_TEMPLATE,
+    );
+    assert_file(&home.path().join("agents/bob/ROLE.md"), ROLE_DEV_TEMPLATE);
+    assert_file(
+        &home.path().join("agents/dave/ROLE.md"),
+        ROLE_QA_TEMPLATE,
+    );
+    assert_file(
+        &home.path().join("agents/eve/ROLE.md"),
+        ROLE_GENERIC_TEMPLATE,
+    );
+}
+
+#[test]
+fn user_layer_identity_template_substitutes_agent_name() {
+    // P6 Step 7 — IDENTITY.md is no longer a static constant: bootstrap
+    // interpolates `agent.name` into the `- Name: ...` row. Pin both
+    // halves of the contract — the agent's display name lands in the
+    // file, AND the `{name}` placeholder is fully consumed (no stray
+    // `{name}` left on disk).
+    let home = tempdir().unwrap();
+    let mut a = agent_with_role("agent_alice", "pm");
+    a.name = "Alice the Memorable".to_string();
+    let roster = [a];
+
+    ensure_user_layer_at(home.path(), &roster).unwrap();
+
+    let content =
+        fs::read_to_string(home.path().join("agents/agent_alice/IDENTITY.md")).unwrap();
+    assert!(
+        content.contains("- Name: Alice the Memorable"),
+        "expected interpolated name in IDENTITY.md, got:\n{content}",
+    );
+    assert!(
+        !content.contains("{name}"),
+        "placeholder `{{name}}` should be fully substituted, got:\n{content}",
+    );
+    // The other identity-card fields are seeded blank — the OpenClaw
+    // identity-file parser treats empty values as placeholders.
+    assert!(content.contains("- Creature:"));
+    assert!(content.contains("- Vibe:"));
+    assert!(content.contains("- Theme:"));
+    assert!(content.contains("- Emoji:"));
+    assert!(content.contains("- Avatar:"));
+}
+
+#[test]
+fn user_layer_role_template_for_is_case_insensitive_and_trim_tolerant() {
+    // Robustness: a team.json with `"role": "PM"` or `" dev "` (stray
+    // whitespace) still picks the right seed rather than falling through
+    // to the generic charter. Mirrors the `to_ascii_lowercase().trim()`
+    // contract documented next to `role_template_for`.
+    let home = tempdir().unwrap();
+    let roster = [
+        agent_with_role("alice", "PM"),
+        agent_with_role("bob", " dev "),
+        agent_with_role("dave", "Qa"),
+    ];
+
+    ensure_user_layer_at(home.path(), &roster).unwrap();
+
+    assert_file(
+        &home.path().join("agents/alice/ROLE.md"),
+        ROLE_PM_TEMPLATE,
+    );
+    assert_file(&home.path().join("agents/bob/ROLE.md"), ROLE_DEV_TEMPLATE);
+    assert_file(
+        &home.path().join("agents/dave/ROLE.md"),
+        ROLE_QA_TEMPLATE,
     );
 }
 

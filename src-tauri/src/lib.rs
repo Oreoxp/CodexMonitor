@@ -21,6 +21,7 @@ mod git;
 mod git_utils;
 mod kanban;
 mod local_usage;
+mod memory_mcp_binary;
 #[cfg(desktop)]
 mod menu;
 #[cfg(not(desktop))]

@@ -366,6 +366,17 @@ pub(crate) async fn send_user_message(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<Value, String> {
+    // Phase 5 Step 3 Block C — re-injection: when the user sends into a
+    // team-agent thread whose daily-memory prelude has gone stale (post-
+    // compaction, cross-day, or resumed-first-message), prepend today's
+    // prelude before the codex turn starts. Safe no-op for non-team
+    // workspaces / non-team threads (returns `text` unchanged).
+    let text = state
+        .team_routers
+        .clone()
+        .prepend_prelude_if_stale(&app, &workspace_id, &thread_id, text)
+        .await;
+
     if remote_backend::is_remote_mode(&*state).await {
         let images = images.map(|paths| {
             paths

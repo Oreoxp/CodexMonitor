@@ -307,5 +307,43 @@ pub(crate) fn ensure_agent_team_session_dir_for_cwd(
     ensure_agent_team_session_dir(&user_dir, agent_id, team_id, cwd)
 }
 
+// ===========================================================================
+// Phase 5 Step 2 — per-agent memory-search MCP server registration
+// ===========================================================================
+
+/// Build the `mcp_servers` entry that registers this agent's
+/// `opencrab-memory-mcp` stdio server. The returned value is the server's
+/// config object (`{ "command": ..., "args": [...] }`); the caller nests it
+/// under the dotted key `config["mcp_servers.opencrab-memory"]` in the
+/// `thread/start` request, so the server is merged into THIS thread's (and
+/// only this thread's) `Config.mcp_servers` — landing in its frozen prompt
+/// snapshot — before the session is built.
+///
+/// `binary_path` is resolved by the caller ([`crate::memory_mcp_binary`]) and
+/// injected so this function stays pure and unit-testable. `agent_id` is
+/// validated as a path segment because it is joined into the memory dir.
+pub(crate) fn build_memory_mcp_server_entry(
+    binary_path: &Path,
+    agent_id: &str,
+    cwd: &Path,
+) -> Result<serde_json::Value, CodexSpawnError> {
+    validate_path_segment(agent_id).map_err(|reason| CodexSpawnError::InvalidId {
+        kind: "agent_id",
+        value: agent_id.to_string(),
+        reason,
+    })?;
+    let project_root = crate::paths::project_root(cwd);
+    let memory_dir = crate::paths::project_agent_memory_dir(&project_root, agent_id);
+    Ok(serde_json::json!({
+        "command": binary_path.display().to_string(),
+        "args": [
+            "--agent-id",
+            agent_id,
+            "--memory-dir",
+            memory_dir.display().to_string(),
+        ],
+    }))
+}
+
 #[cfg(test)]
 mod tests;
