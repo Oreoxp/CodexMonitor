@@ -32,14 +32,12 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 
 use crate::shared::codex_core::{
-    compact_thread_core, get_session_clone, resolve_workspace_path_core, send_user_message_core,
+    get_session_clone, resolve_workspace_path_core, send_user_message_core,
 };
 use crate::state::AppState;
 use crate::tasks::{list_tasks_at_path, tasks_proposed_event, Task, TaskStatus};
 
-use super::flush::{extract_turn_id, flush_content, flush_prompt, persist_flush};
 use super::plan_parser::{parse_propose_plan_blocks, ParsedPlan};
-use super::token_watcher::{parse_token_usage, FlushSignal, TokenWatcher};
 
 const USER_PUBLISHER: &str = "user";
 
@@ -49,7 +47,7 @@ pub(crate) struct AgentInfo {
     pub(crate) name: String,
     #[serde(rename = "threadId")]
     pub(crate) thread_id: String,
-    /// Phase 5 Step 3 Block C — `true` iff the sidecar just provisioned this
+    /// Phase 6 — Block C (inherited from P5) — `true` iff the sidecar just provisioned this
     /// agent's thread in the current call (it ran the kickoff with today's
     /// daily-memory prelude). `false` for resumed threads (bound from a
     /// previous session, no kickoff this session). Drives the initial value
@@ -131,7 +129,7 @@ impl TeamRouters {
         // ground truth — restarting the workspace must reattach the latch
         // for those rows without the user having to re-touch the modal.
         let pending_seed = hydrate_pending_approvals(&app_handle, &workspace_id, &team_id).await;
-        // Phase 5 Step 3 Block C — initial prelude-date state per thread.
+        // Phase 6 — Block C (inherited from P5) — initial prelude-date state per thread.
         // Freshly-provisioned threads have today's prelude in their live
         // context (Step 1's kickoff injected it). Resumed threads start at
         // `None` so their next outgoing message re-injects.
@@ -192,7 +190,7 @@ impl TeamRouters {
         drop(router);
     }
 
-    /// Phase 5 Step 3 Block C — Re-injection intercept.
+    /// Phase 6 — Block C (inherited from P5) — Re-injection intercept.
     ///
     /// Returns `text` unchanged when sending into a team thread whose live
     /// context already has today's daily-memory prelude. Otherwise fetches
@@ -261,7 +259,7 @@ impl TeamRouters {
         {
             None => {
                 eprintln!(
-                    "[memory-flush] thread={thread_id} prelude re-injection: no sidecar \
+                    "[memory-prelude] thread={thread_id} prelude re-injection: no sidecar \
                      running for workspace {workspace_id}; sending without prelude"
                 );
                 Err(())
@@ -275,7 +273,7 @@ impl TeamRouters {
             {
                 Err(err) => {
                     eprintln!(
-                        "[memory-flush] thread={thread_id} agent={agent_id} prelude RPC \
+                        "[memory-prelude] thread={thread_id} agent={agent_id} prelude RPC \
                          failed: {err}; sending without prelude"
                     );
                     Err(())
@@ -299,7 +297,7 @@ impl TeamRouters {
                 .insert(thread_id.to_string(), Some(date));
             if prelude_len > 0 {
                 eprintln!(
-                    "[memory-flush] thread={thread_id} agent={agent_id} re-injected \
+                    "[memory-prelude] thread={thread_id} agent={agent_id} re-injected \
                      daily-memory prelude ({prelude_len} chars)"
                 );
             }
@@ -319,7 +317,7 @@ struct SharedRouterState {
     known_agent_ids: HashSet<String>,
     subscriptions: Vec<Subscription>,
     app_handle: AppHandle,
-    /// Phase 5 Step 3 Block C — per-thread "which date's daily-memory prelude
+    /// Phase 6 — Block C (inherited from P5) — per-thread "which date's daily-memory prelude
     /// is currently in the thread's live context". `Some(d)` after a (re-)
     /// injection on date `d`; `None` after a `thread/compacted` cleared it,
     /// or initial-state for a resumed thread we did not just kickoff. The
@@ -422,35 +420,6 @@ async fn hydrate_pending_approvals(
     }
 }
 
-/// Per-thread pre-compaction-flush state, held as a `spawn_consumer`
-/// task-local. Block B fires the flush once per crossing (the watcher itself
-/// is fire-once); Block C re-arms after the post-flush compaction.
-///
-/// **2026-05-23 fix: `PendingInject` deferred-inject state.** Codex queues
-/// any `turn/start` input that arrives while a turn is active as PENDING
-/// INPUT into that active turn. The pending input becomes a continuation of
-/// the active turn rather than starting its own new turn. `turn/start`
-/// still returns a fresh submission id, but no events ever carry it — the
-/// active turn's id stays in all emissions (verified 2026-05-23: captured
-/// `019e5441-90cb` vs all events carrying `019e5441-8ef3`). The `<daily_log>`
-/// arrives in the active turn's second sampling cycle and turn/completed
-/// fires with the active turn's id, permanently failing `AwaitingResponse`'s
-/// id match. The fix: don't inject WHILE a turn is active. Hold the signal
-/// in `PendingInject` and inject on the next `turn/completed`, when the
-/// thread is briefly idle and codex starts our flush as its own turn.
-#[derive(Debug)]
-enum FlushState {
-    /// No flush turn outstanding and no signal queued.
-    Idle,
-    /// Watcher fired but injection is deferred — `turn/start` right now
-    /// would get merged into the active turn as pending input. Holds the
-    /// signal until the next `turn/completed` lands.
-    PendingInject(FlushSignal),
-    /// A flush turn was injected; the `turn/completed` whose `turn` id equals
-    /// `turn_id` carries the agent's `<daily_log>` note.
-    AwaitingResponse { turn_id: String },
-}
-
 fn spawn_consumer(
     mut rx: mpsc::UnboundedReceiver<Value>,
     thread_id: String,
@@ -458,11 +427,6 @@ fn spawn_consumer(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut buf = String::new();
-        // Phase 5 Step 3 Block A — per-thread compaction-flush sensing. The
-        // consumer task is already per-thread, so the watcher is a task-local.
-        let mut token_watcher = TokenWatcher::new();
-        // Phase 5 Step 3 Block B — the in-flight flush turn for this thread.
-        let mut flush_state = FlushState::Idle;
         loop {
             let Some(event) = rx.recv().await else {
                 // Channel closed — sidecar restarted the router (or workspace
@@ -470,38 +434,6 @@ fn spawn_consumer(
                 return;
             };
             let method = event.get("method").and_then(|m| m.as_str()).unwrap_or("");
-
-            // 2026-05-23 escalation: when the flush turn truly completes
-            // but no `[memory-flush] matched flush turn` log appears, we
-            // have no visibility into what events actually arrived between
-            // inject and the (missing) completion. While AwaitingResponse,
-            // trace every non-delta event method + (if present) the
-            // event's turn id and item type. Noisy `*/delta` events are
-            // excluded so a typical flush turn doesn't drown the log.
-            if matches!(flush_state, FlushState::AwaitingResponse { .. })
-                && !is_high_volume_delta(method)
-            {
-                let evt_turn_id = event
-                    .get("params")
-                    .and_then(|p| p.get("turnId").or_else(|| p.get("turn").and_then(|t| t.get("id"))))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("-");
-                let item_kind = event
-                    .get("params")
-                    .and_then(|p| p.get("item"))
-                    .and_then(|i| i.get("itemType").or_else(|| i.get("type")))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let item_suffix = if item_kind.is_empty() {
-                    String::new()
-                } else {
-                    format!(" item.type={item_kind}")
-                };
-                eprintln!(
-                    "[memory-flush][trace] thread={thread_id} awaiting flush; \
-                     received method={method} turn={evt_turn_id}{item_suffix}"
-                );
-            }
 
             match method {
                 "item/agentMessage/delta" => {
@@ -522,75 +454,12 @@ fn spawn_consumer(
                         .and_then(|t| t.get("status"))
                         .and_then(|s| s.as_str())
                         .unwrap_or("");
-                    let completed_turn_id = turn
-                        .and_then(|t| t.get("id"))
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("");
                     let error = turn.and_then(|t| t.get("error"));
                     let has_error = error.map(|e| !e.is_null()).unwrap_or(false);
 
-                    // Phase 5 Step 3 Block B — is this the flush turn we
-                    // injected? Matched by turn id, so a normal turn that
-                    // interleaves cannot be mistaken for the flush response.
-                    let is_flush_response = matches!(
-                        &flush_state,
-                        FlushState::AwaitingResponse { turn_id }
-                            if !completed_turn_id.is_empty()
-                                && turn_id == completed_turn_id
-                    );
-
-                    if is_flush_response {
-                        // Capture the flush turn id before clearing state —
-                        // it goes into the MemoryFlush audit event below.
-                        let flush_turn_id = completed_turn_id.to_string();
-                        flush_state = FlushState::Idle;
-                        let final_text = std::mem::take(&mut buf);
-                        // Link 2 diagnostic: route matched as flush. Include
-                        // buffer length so a zero-length flush response
-                        // (deltas never accumulated — `<send_message>` works
-                        // because it goes through the same path, so a zero
-                        // here would point at a different event-type path
-                        // we'd need to add) is obvious from stderr alone.
-                        eprintln!(
-                            "[memory-flush] thread={thread_id} turn/completed matched flush \
-                             turn id={flush_turn_id}; routing to handle_flush_response \
-                             (buf chars={})",
-                            final_text.chars().count()
-                        );
-                        if status == "failed" || has_error {
-                            eprintln!(
-                                "[memory-flush] thread={} flush turn failed \
-                                 (status={}); nothing persisted",
-                                thread_id, status,
-                            );
-                        } else {
-                            handle_flush_response(
-                                &shared,
-                                &thread_id,
-                                &flush_turn_id,
-                                &final_text,
-                            )
-                            .await;
-                            // 2026-05-23 NOTE: deliberately do NOT rearm the
-                            // watcher here. Rearming is gated on the
-                            // `thread/compacted` arm so that next-fire only
-                            // triggers AFTER usage has actually dropped via
-                            // a successful compaction. If we rearmed on
-                            // persist instead, a provider whose compaction
-                            // path fails (Qwen / DashScope: "When using
-                            // tool_choice, tools must be set") would loop —
-                            // usage stays high, next tokenUsage refires the
-                            // watcher, another flush, another failed
-                            // compact, ad infinitum. Trade-off: on such a
-                            // provider we get exactly ONE flush per agent
-                            // per session (the file IS durable, just no
-                            // repeat). Tracked as follow-up; real fix is
-                            // upstream in codex-rs's compact request.
-                        }
-                    } else if status == "failed" || has_error {
-                        // Grep-friendly trace for any (kickoff / routed) turn
-                        // failure; discard the buffer rather than route
-                        // partial text.
+                    if status == "failed" || has_error {
+                        // Grep-friendly trace for any turn failure; discard
+                        // the buffer rather than route partial text.
                         eprintln!(
                             "[team_router] thread={} turn failed: status={} error={}",
                             thread_id,
@@ -601,45 +470,8 @@ fn spawn_consumer(
                         );
                         buf.clear();
                     } else {
-                        // Link 2 diagnostic: turn/completed routed to normal
-                        // (process_final_text). If we were ALSO awaiting a
-                        // flush response, log the id drift — that's the
-                        // silent-fail mode #4 (captured turn_id ≠ codex's
-                        // completed turn_id), and without this log a flush
-                        // that died there leaves no stderr trace at all.
-                        // With the 2026-05-23 deferred-inject fix this should
-                        // not happen anymore (we never inject during an
-                        // active turn), but the log stays as a safety net.
-                        if let FlushState::AwaitingResponse { turn_id: awaited } = &flush_state {
-                            eprintln!(
-                                "[memory-flush] thread={thread_id} got turn/completed \
-                                 id={completed_turn_id} while awaiting flush turn \
-                                 id={awaited}; routed to normal path (flush response NOT \
-                                 captured this cycle)"
-                            );
-                        }
                         let final_text = std::mem::take(&mut buf);
                         process_final_text(&shared, &thread_id, &final_text).await;
-                    }
-
-                    // 2026-05-23 deferred-inject fix: now that the prior
-                    // turn has wrapped, see if we have a flush waiting to be
-                    // injected. The thread is briefly idle here (between
-                    // this turn ending and any subsequent turn starting); a
-                    // `turn/start` issued now will start its own new turn
-                    // rather than getting merged as pending input. Runs
-                    // regardless of which branch above fired — flush /
-                    // failed / normal — so a deferred flush is never lost.
-                    if matches!(flush_state, FlushState::PendingInject(_)) {
-                        let prev = std::mem::replace(&mut flush_state, FlushState::Idle);
-                        if let FlushState::PendingInject(signal) = prev {
-                            eprintln!(
-                                "[memory-flush] thread={thread_id} prior turn ended; \
-                                 injecting deferred flush now"
-                            );
-                            flush_state =
-                                inject_flush_turn(&shared, &thread_id, &signal).await;
-                        }
                     }
                 }
                 "error" => {
@@ -681,111 +513,13 @@ fn spawn_consumer(
                     buf.clear();
                 }
                 "thread/compacted" => {
-                    // Phase 5 Step 3 Block C — codex compacted this thread.
-                    // Three possible originators (we cannot distinguish):
-                    //   1. Our `trigger_compaction_after_flush` post-flush.
-                    //      `flush_state` was set to Idle inside the
-                    //      is_flush_response branch BEFORE handle_flush_response
-                    //      ran — so by now it is Idle. No-op.
-                    //   2. Codex's own auto-compact triggered AFTER a normal
-                    //      turn (we did not inject in time, or `model_auto_
-                    //      compact_token_limit` is tighter than our soft).
-                    //      `flush_state` was Idle throughout. No-op.
-                    //   3. ★ Codex's `run_pre_sampling_compact` triggered
-                    //      BEFORE sampling for OUR injected flush turn
-                    //      (because usage was already past codex's 90%
-                    //      ceiling at injection time — 242576/258400 ≥
-                    //      232560 in the 2026-05-23 user report). The flush
-                    //      turn is still queued; its `turn/completed` will
-                    //      arrive AFTER this notification. `flush_state` is
-                    //      `AwaitingResponse(flush_turn_id)`. If we reset to
-                    //      Idle here, the post-compaction flush completion
-                    //      fails the `is_flush_response` match, silently
-                    //      routes to `process_final_text`, and the
-                    //      `<daily_log>` content is dropped (THIS WAS THE
-                    //      BUG behind the user's "目录存在但空" symptom).
-                    //      We MUST preserve `AwaitingResponse` here.
-                    let preserve_flush_state = flush_state_should_survive_compaction(&flush_state);
-                    if preserve_flush_state {
-                        match &flush_state {
-                            FlushState::AwaitingResponse { turn_id } => {
-                                eprintln!(
-                                    "[memory-flush] thread={thread_id} thread/compacted while \
-                                     awaiting flush turn id={turn_id}; preserving AwaitingResponse \
-                                     (codex pre-sampling auto-compact — flush turn still queued, \
-                                     its turn/completed will be recognized post-compaction)"
-                                );
-                            }
-                            FlushState::PendingInject(_) => {
-                                eprintln!(
-                                    "[memory-flush] thread={thread_id} thread/compacted while \
-                                     a flush is queued for deferred injection; preserving \
-                                     PendingInject (will inject on the next turn/completed)"
-                                );
-                            }
-                            FlushState::Idle => unreachable!(
-                                "predicate returned true but state is Idle"
-                            ),
-                        }
-                    } else {
-                        eprintln!(
-                            "[memory-flush] thread={thread_id} compaction completed (flush_state \
-                             was Idle); re-arming watcher"
-                        );
-                        flush_state = FlushState::Idle;
-                    }
-                    token_watcher.rearm();
-                    // Compaction compressed the prelude away — the invariant
-                    // is restored on the NEXT outgoing message by
-                    // `prepend_prelude_if_stale` (it sees `None` and
-                    // re-injects today's prelude).
-                    shared
-                        .prelude_dates
-                        .lock()
-                        .await
-                        .insert(thread_id.clone(), None);
-                }
-                "thread/tokenUsage/updated" => {
-                    // Phase 5 Step 3 Block B — compaction-flush trigger. codex
-                    // fans this notification to the per-thread tap on every
-                    // turn boundary (and post-compaction recompute); feed the
-                    // cumulative usage to the watcher and, on the first
-                    // crossing of the soft threshold, QUEUE a flush — do NOT
-                    // inject immediately. tokenUsage fires DURING the active
-                    // turn's `ResponseEvent::Completed` (codex-rs `session/
-                    // turn.rs:2120`), so the active turn is still running;
-                    // a `turn/start` issued here would be queued by codex as
-                    // pending input into the active turn (not start a new
-                    // turn), and the merged continuation's `turn/completed`
-                    // would carry the active turn's id rather than the
-                    // submission id we captured — permanent id-mismatch.
-                    // The deferred-inject path triggers in the `turn/
-                    // completed` arm below, when the thread is briefly idle.
-                    if let Some((total_tokens, model_context_window)) =
-                        parse_token_usage(&event)
-                    {
-                        if let Some(signal) =
-                            token_watcher.observe(total_tokens, model_context_window)
-                        {
-                            if matches!(flush_state, FlushState::Idle) {
-                                let agent_label = shared
-                                    .by_thread
-                                    .get(&thread_id)
-                                    .map(|a| a.id.as_str())
-                                    .unwrap_or("?");
-                                eprintln!(
-                                    "[memory-flush] thread={thread_id} agent={agent_label} \
-                                     crossed soft threshold (usage={}/{} ceiling={}) — \
-                                     deferring flush injection to next turn/completed (avoid \
-                                     pending-input merge into active turn)",
-                                    signal.total_tokens,
-                                    signal.model_context_window,
-                                    signal.ceiling,
-                                );
-                                flush_state = FlushState::PendingInject(signal);
-                            }
-                        }
-                    }
+                    // Phase 6 — Block C re-injection trigger. Codex compacted
+                    // this thread (its own auto-compact, a frontend-triggered
+                    // manual compact, or any future system-triggered
+                    // compaction — the originator does not matter for this
+                    // contract). See `mark_prelude_stale_on_compaction` for
+                    // the load-bearing state op + the wider Block C contract.
+                    mark_prelude_stale_on_compaction(&shared.prelude_dates, &thread_id).await;
                 }
                 _ => {}
             }
@@ -794,252 +528,11 @@ fn spawn_consumer(
 }
 
 // ---------------------------------------------------------------------------
-// Phase 5 Step 3 Block B — pre-compaction memory flush
+// Phase 6 — Block C (inherited from P5) — daily-memory prelude re-injection
+// (the rest of P5's write layer was deleted in P6 Step 3; this Block stays)
 // ---------------------------------------------------------------------------
 
-/// Inject the pre-compaction flush turn into `thread_id`. The flush turn is a
-/// system-framed user-role message (`flush::flush_prompt`); the agent answers
-/// with a `<daily_log>` note. Returns the new `FlushState`:
-/// `AwaitingResponse` on success, `Idle` (a logged soft failure) when the
-/// turn cannot be started or its id cannot be read.
-async fn inject_flush_turn(
-    shared: &SharedRouterState,
-    thread_id: &str,
-    signal: &FlushSignal,
-) -> FlushState {
-    let agent_label = shared
-        .by_thread
-        .get(thread_id)
-        .map(|a| a.id.as_str())
-        .unwrap_or("?");
-    eprintln!(
-        "[memory-flush] thread={thread_id} agent={agent_label} crossed soft threshold \
-         (usage={}/{} ceiling={}) — injecting flush turn",
-        signal.total_tokens, signal.model_context_window, signal.ceiling,
-    );
-    let state = shared.app_handle.state::<AppState>();
-    let result = send_user_message_core(
-        &state.sessions,
-        &state.workspaces,
-        shared.workspace_id.clone(),
-        thread_id.to_string(),
-        flush_prompt(),
-        None,
-        None,
-        None,
-        // full-access → per-turn `approvalPolicy: never`, so the flush turn
-        // runs unattended — same posture as the provisioning kickoff turn.
-        Some("full-access".to_string()),
-        None,
-        None,
-        None,
-    )
-    .await;
-    drop(state);
-    match result {
-        Ok(response) => match extract_turn_id(&response) {
-            Some(turn_id) => {
-                // Link 1 diagnostic: which turn id are we now awaiting? On
-                // the next turn/completed for `thread_id` we compare against
-                // this; if codex emits the completion with a different id
-                // shape (or `extract_turn_id` reads the wrong field), the
-                // Link 2 drift log will show both sides side-by-side.
-                eprintln!(
-                    "[memory-flush] thread={thread_id} flush turn injected; \
-                     awaiting turn id={turn_id}"
-                );
-                FlushState::AwaitingResponse { turn_id }
-            }
-            None => {
-                // Dump the raw response (truncated) so the JSON shape that
-                // foiled `extract_turn_id` is recoverable from stderr — the
-                // turn-id contract is the load-bearing one, drift here is
-                // the most likely silent-fail mode.
-                let raw = response.to_string();
-                let truncated = truncate_for_log(&raw, 800);
-                eprintln!(
-                    "[memory-flush] thread={thread_id} flush turn started but the response \
-                     carried no turn id; the flush response cannot be captured this cycle. \
-                     Raw response (truncated to 800 chars):\n{truncated}"
-                );
-                FlushState::Idle
-            }
-        },
-        Err(err) => {
-            eprintln!("[memory-flush] thread={thread_id} flush turn injection failed: {err}");
-            FlushState::Idle
-        }
-    }
-}
-
-/// Handle the agent's response to an injected flush turn: parse the
-/// `<daily_log>` note and append it to the agent's daily memory file, then
-/// record a `memory_flush` audit event. A missing / malformed tag is a soft
-/// failure — log (with a truncated raw-response dump so the actual shape is
-/// recoverable from stderr) and move on, nothing is persisted.
-async fn handle_flush_response(
-    shared: &SharedRouterState,
-    thread_id: &str,
-    flush_turn_id: &str,
-    response_text: &str,
-) {
-    let Some(agent) = shared.by_thread.get(thread_id) else {
-        eprintln!("[memory-flush] flush response for unknown thread {thread_id}; dropped");
-        return;
-    };
-    let agent_id = agent.id.clone();
-    // Link 3 diagnostic: we entered. Response length lets a reader at the
-    // log decide whether the issue is upstream (zero-length → consumer
-    // accumulator missed the deltas) or downstream (non-zero → parse /
-    // persist).
-    eprintln!(
-        "[memory-flush] thread={thread_id} agent={agent_id} handle_flush_response entered \
-         (response chars={})",
-        response_text.chars().count()
-    );
-    let Some(content) = flush_content(response_text) else {
-        // Visible-level log: dump the raw response (truncated) so the next
-        // time this triggers in production we can diagnose what the agent
-        // actually emitted (a non-tag chat reply? a different tag shape we
-        // haven't seen?) instead of guessing. Truncation is char-boundary
-        // safe; 800 chars is enough to see the closing region of any
-        // reasonable flush note.
-        let truncated = truncate_for_log(response_text, 800);
-        eprintln!(
-            "[memory-flush] thread={thread_id} agent={agent_id} flush response had no \
-             usable <daily_log> tag; nothing persisted. Raw response (truncated to 800 \
-             chars):\n{truncated}"
-        );
-        return;
-    };
-    // Link 3 diagnostic: parse succeeded — how many chars made it through?
-    // (Together with the entry log this isolates "parser ate something" from
-    // "agent gave us nothing useful in the tag".)
-    eprintln!(
-        "[memory-flush] thread={thread_id} agent={agent_id} parsed <daily_log> content \
-         ({} chars)",
-        content.chars().count()
-    );
-    let Some(workspace_path) = resolve_workspace_path(shared).await else {
-        return;
-    };
-    // Link 4 diagnostic: log the target file path BEFORE the (blocking)
-    // persist call. If the dir-without-file pattern recurs, this line tells
-    // us exactly which path we tried to write — distinguishing "we wrote to
-    // some other workspace" from "we wrote to the right place but io
-    // failed".
-    let today_local = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let target_file = crate::paths::project_agent_memory_file(
-        &crate::paths::project_root(&workspace_path),
-        &agent_id,
-        &today_local,
-    );
-    eprintln!(
-        "[memory-flush] thread={thread_id} agent={agent_id} persisting to {}",
-        target_file.display()
-    );
-    // `persist_flush` is blocking filesystem work — run it off the consumer.
-    let persist = {
-        let workspace_path = workspace_path.clone();
-        let agent_id = agent_id.clone();
-        tokio::task::spawn_blocking(move || persist_flush(&workspace_path, &agent_id, &content))
-            .await
-    };
-    // Phase 5 Step 3 Block C Part 6 — gate the post-flush compaction on a
-    // full persist success via a pure predicate. Captured BEFORE the match
-    // consumes `persist`, so the trigger lives outside the arm and is
-    // independently regression-testable (`should_trigger_compaction`).
-    let should_compact = should_trigger_compaction(&persist);
-    match persist {
-        Ok(Ok(chars_written)) => {
-            eprintln!(
-                "[memory-flush] thread={thread_id} agent={agent_id} persisted {chars_written} \
-                 chars to project-memory"
-            );
-            emit_memory_flush_event(
-                shared,
-                &workspace_path,
-                &agent_id,
-                flush_turn_id,
-                chars_written,
-            )
-            .await;
-        }
-        Ok(Err(err)) => {
-            eprintln!("[memory-flush] thread={thread_id} agent={agent_id} persist failed: {err}");
-        }
-        Err(join_err) => {
-            eprintln!("[memory-flush] thread={thread_id} persist task panicked: {join_err}");
-        }
-    }
-    if should_compact {
-        // Chase the flush with our own compaction so the post-flush summary
-        // is deterministic (rather than waiting for codex's auto-compact).
-        // Best-effort: a failure logs and is swallowed — codex auto-compacts
-        // later regardless, and the `thread/compacted` arm re-arms the
-        // watcher whichever path got us there.
-        trigger_compaction_after_flush(shared, thread_id).await;
-    }
-}
-
-/// Char-boundary-safe truncate for a single-line stderr log: cut `text` to
-/// at most `max_chars` chars, append an "+N more chars" marker so a reader
-/// knows there was more. Used by `handle_flush_response` to dump the raw
-/// flush response when no `<daily_log>` tag is found, so the next time this
-/// triggers in production we can recover the actual shape from stderr
-/// instead of guessing at the failure mode.
-fn truncate_for_log(text: &str, max_chars: usize) -> String {
-    let total = text.chars().count();
-    if total <= max_chars {
-        return text.to_string();
-    }
-    let kept: String = text.chars().take(max_chars).collect();
-    format!("{kept}… [+{} more chars]", total - max_chars)
-}
-
-/// 2026-05-23 trace-log filter: which notification methods are high-
-/// volume deltas the AwaitingResponse trace should suppress. A typical
-/// flush turn fires dozens of `item/agentMessage/delta` plus reasoning
-/// deltas; logging each one drowns the trace. Lifecycle events (item/
-/// started, item/completed, turn/started, turn/completed, thread/
-/// compacted, error, warning) are NOT in this set so they all surface.
-fn is_high_volume_delta(method: &str) -> bool {
-    matches!(
-        method,
-        "item/agentMessage/delta"
-            | "item/reasoning/textDelta"
-            | "item/reasoning/summaryTextDelta"
-            | "item/plan/delta"
-            | "item/commandExecution/outputDelta"
-            | "item/fileChange/outputDelta"
-    )
-}
-
-/// 2026-05-23 bug fix predicate: when `thread/compacted` arrives, should
-/// the consumer's `FlushState` survive (true) or reset to `Idle` (false)?
-///
-/// **True iff `flush_state` carries unfinished work** —
-/// `AwaitingResponse` (flush in flight) OR `PendingInject` (flush queued
-/// but not yet injected, waiting for the active turn to end). Rationale:
-/// codex's `run_pre_sampling_compact` (codex-rs `core/src/session/
-/// turn.rs:741`) auto-compacts BEFORE sampling whenever
-/// `total_usage_tokens >= auto_compact_token_limit`. The original report
-/// (usage 242576/258400 ≥ 232560) hit this. If we reset `flush_state` to
-/// `Idle` on `thread/compacted`, the unfinished work is lost and the
-/// `<daily_log>` content goes nowhere (the "目录存在但空" symptom).
-///
-/// Returning `true` keeps either kind of unfinished state intact across
-/// compaction. The other two `thread/compacted` originators (post-flush
-/// compaction we triggered, or codex's own auto-compact after a non-flush
-/// turn) both find `flush_state == Idle` and hit the false branch.
-fn flush_state_should_survive_compaction(flush_state: &FlushState) -> bool {
-    matches!(
-        flush_state,
-        FlushState::AwaitingResponse { .. } | FlushState::PendingInject(_)
-    )
-}
-
-/// Phase 5 Step 3 Block C — pure date-comparison predicate for the re-
+/// Phase 6 — Block C (inherited from P5) — pure date-comparison predicate for the re-
 /// injection invariant. The three re-injection triggers all reach `true`
 /// through this check:
 ///   1. Post-compaction: `thread/compacted` arm cleared the entry → `current
@@ -1051,7 +544,33 @@ fn prelude_is_stale(current_prelude_date: Option<&str>, today_local: &str) -> bo
     current_prelude_date != Some(today_local)
 }
 
-/// Phase 5 Step 3 Block C — initial value of a thread's `prelude_dates` entry
+/// Phase 6 — Block C — the body the `"thread/compacted"` arm runs. Clearing
+/// `prelude_dates[thread] = None` is the load-bearing state op: it makes
+/// `prelude_is_stale` flag `true` on the next outgoing message, which
+/// `prepend_prelude_if_stale` then turns into a fresh prelude fetch + a
+/// `compose_with_prelude` prepend.
+///
+/// Extracted so the real consumer arm and the unit-test that exercises
+/// "compacted → next message re-injects" both bind to the same function —
+/// a literal-copy in the test would silently drift if the arm body
+/// changed. Takes the `prelude_dates` field directly (rather than the
+/// whole `SharedRouterState`) so the test can drive it without faking
+/// the rest of the router fixture.
+async fn mark_prelude_stale_on_compaction(
+    prelude_dates: &Mutex<HashMap<String, Option<String>>>,
+    thread_id: &str,
+) {
+    eprintln!(
+        "[team_router] thread={thread_id} thread/compacted; clearing prelude \
+         date so next outgoing message re-injects today's prelude"
+    );
+    prelude_dates
+        .lock()
+        .await
+        .insert(thread_id.to_string(), None);
+}
+
+/// Phase 6 — Block C (inherited from P5) — initial value of a thread's `prelude_dates` entry
 /// when the team router starts. `freshly_provisioned` is the sidecar's
 /// "this run kicked the agent off with today's prelude" signal — when true,
 /// the live context has today's prelude and we start fresh; otherwise (a
@@ -1064,21 +583,9 @@ fn initial_prelude_date(freshly_provisioned: bool, today_local: &str) -> Option<
     }
 }
 
-/// Phase 5 Step 3 Block C Part 6 — pure predicate captured for regression
-/// coverage of the flush-then-compact wiring: only trigger our own
-/// `thread/compact/start` after a *full* flush success (`Ok(Ok(_))`). Any
-/// error along the persist path means the project-memory file did not
-/// durably gain the new note, so we leave the compaction to codex's own
-/// auto-compact rather than race it with a partial write. Generic over the
-/// error types so tests can build fake results without manufacturing a real
-/// `tokio::task::JoinError`.
-fn should_trigger_compaction<E1, E2>(persist: &Result<Result<usize, E1>, E2>) -> bool {
-    matches!(persist, Ok(Ok(_)))
-}
-
-/// Phase 5 Step 3 Block C Part 6 — compose an outgoing message with a daily-
+/// Phase 6 — Block C (inherited from P5) — compose an outgoing message with a daily-
 /// memory prelude. Empty prelude → text passes through unchanged (the legit
-/// "project has no project-memory yet" case); non-empty → prelude + blank
+/// "agent has no log entries yet" case); non-empty → prelude + blank
 /// line + text. Separated from `finalize_text_with_prelude` to pin the
 /// exact `\n\n` separator under unit tests.
 fn compose_with_prelude(prelude: &str, text: String) -> String {
@@ -1089,7 +596,7 @@ fn compose_with_prelude(prelude: &str, text: String) -> String {
     }
 }
 
-/// Phase 5 Step 3 Block C Part 6 — pure state-machine of
+/// Phase 6 — Block C (inherited from P5) — pure state-machine of
 /// `prepend_prelude_if_stale`. Captures every decision the re-injection
 /// intercept makes, so regression tests can drive it directly with mocked
 /// fetch results.
@@ -1124,69 +631,6 @@ fn finalize_text_with_prelude(
             Some(today_local.to_string()),
         ),
     }
-}
-
-/// Phase 5 Step 3 Block C — request codex compact this thread right after a
-/// successful flush, so the post-flush summary is deterministic. Best-effort:
-/// a failure is logged and swallowed; codex will eventually auto-compact, and
-/// the `thread/compacted` arm re-arms the watcher either way.
-async fn trigger_compaction_after_flush(shared: &SharedRouterState, thread_id: &str) {
-    let state = shared.app_handle.state::<AppState>();
-    let result = compact_thread_core(
-        &state.sessions,
-        shared.workspace_id.clone(),
-        thread_id.to_string(),
-    )
-    .await;
-    drop(state);
-    match result {
-        Ok(_) => eprintln!(
-            "[memory-flush] thread={thread_id} compaction requested after flush"
-        ),
-        Err(err) => eprintln!(
-            "[memory-flush] thread={thread_id} compaction request failed: {err}; \
-             codex will auto-compact later"
-        ),
-    }
-}
-
-/// Append a `memory_flush` event to `events.jsonl` — the durable, auditable
-/// record that this turn-pair was housekeeping. Best-effort: a log-open /
-/// write failure is logged and swallowed.
-async fn emit_memory_flush_event(
-    shared: &SharedRouterState,
-    workspace_path: &std::path::Path,
-    agent_id: &str,
-    flush_turn_id: &str,
-    chars_written: usize,
-) {
-    let state = shared.app_handle.state::<AppState>();
-    match crate::events::get_or_create_event_log(
-        &state,
-        workspace_path,
-        &shared.workspace_id,
-        &shared.team_id,
-    ) {
-        Ok(log) => {
-            if let Err(err) = log.emit(
-                None,
-                crate::events::TeamEventBody::MemoryFlush {
-                    agent_id: agent_id.to_string(),
-                    flush_turn_id: flush_turn_id.to_string(),
-                    chars_written,
-                },
-            ) {
-                eprintln!("[memory-flush] memory_flush event emit failed: {err}");
-            }
-        }
-        Err(err) => {
-            eprintln!(
-                "[memory-flush] cannot open event log for team={}: {err}",
-                shared.team_id
-            );
-        }
-    }
-    drop(state);
 }
 
 async fn process_final_text(shared: &SharedRouterState, sender_thread: &str, text: &str) {
@@ -1257,7 +701,7 @@ async fn process_final_text(shared: &SharedRouterState, sender_thread: &str, tex
             continue;
         };
         let framed = format!("[From {}]\n{}", sender.name, tag.content);
-        // Phase 5 Step 3 Block C — re-injection: if the target thread's
+        // Phase 6 — Block C (inherited from P5) — re-injection: if the target thread's
         // daily-memory prelude has gone stale (post-compaction, cross-day,
         // or first send into a resumed thread), prepend today's prelude
         // here so the target agent answers with current memory in its live
@@ -2329,81 +1773,7 @@ between
         assert!(msg.contains("Plan review complete, but no tasks were found"));
     }
 
-    // -- 2026-05-23 trace filter ---------------------------------------------
-
-    #[test]
-    fn is_high_volume_delta_blocks_only_delta_methods() {
-        // Suppressed: high-volume streaming deltas.
-        assert!(is_high_volume_delta("item/agentMessage/delta"));
-        assert!(is_high_volume_delta("item/reasoning/textDelta"));
-        assert!(is_high_volume_delta("item/reasoning/summaryTextDelta"));
-        assert!(is_high_volume_delta("item/plan/delta"));
-        assert!(is_high_volume_delta("item/commandExecution/outputDelta"));
-        assert!(is_high_volume_delta("item/fileChange/outputDelta"));
-        // NOT suppressed — these are the lifecycle events the trace must
-        // surface so we can see what actually happens during a flush:
-        for m in [
-            "item/started",
-            "item/completed",
-            "turn/started",
-            "turn/completed",
-            "thread/compacted",
-            "thread/tokenUsage/updated",
-            "error",
-            "turn/error",
-            "warning",
-        ] {
-            assert!(!is_high_volume_delta(m), "{m} must NOT be filtered");
-        }
-    }
-
-    // -- 2026-05-23 bug fix: pre-sampling auto-compact during flush turn ----
-
-    #[test]
-    fn flush_state_should_survive_compaction_keeps_unfinished_work_resets_idle() {
-        // Multi-part 2026-05-23 bug story.
-        //
-        // Originally: codex auto-compacted PRE-sampling for our injected
-        // flush turn (242576/258400 ≥ 232560). The consumer reset
-        // `flush_state` to `Idle` on `thread/compacted`; the flush turn's
-        // post-compaction `turn/completed` then failed `is_flush_response`
-        // and the `<daily_log>` was silently dropped — the "目录存在但空"
-        // symptom. First fix: preserve `AwaitingResponse` across compaction.
-        //
-        // Follow-up: even with `AwaitingResponse` preserved, the bug recurred
-        // because `turn/start` issued WHILE a turn was active was queued by
-        // codex as PENDING INPUT into that active turn (captured submission
-        // id `019e5441-90cb` vs all events carrying active turn id
-        // `019e5441-8ef3`, verified via the AwaitingResponse trace log).
-        // The flush turn never instantiated as its own turn. Fix: defer
-        // injection until the next `turn/completed`. Hold the signal in
-        // `PendingInject(FlushSignal)` until then.
-        //
-        // For the compaction-survival contract this means BOTH unfinished
-        // states must survive (`AwaitingResponse` AND `PendingInject`) —
-        // losing either drops the flush silently.
-        assert!(
-            flush_state_should_survive_compaction(&FlushState::AwaitingResponse {
-                turn_id: "019e5359-063d-71a0-aabb-c4b099cbca95".to_string(),
-            }),
-            "AwaitingResponse must survive thread/compacted — flush in flight post-compaction"
-        );
-        assert!(
-            flush_state_should_survive_compaction(&FlushState::PendingInject(FlushSignal {
-                total_tokens: 242576,
-                model_context_window: 258400,
-                ceiling: 232560,
-                soft_threshold: 220560,
-            })),
-            "PendingInject must survive thread/compacted — flush queued, not yet injected"
-        );
-        assert!(
-            !flush_state_should_survive_compaction(&FlushState::Idle),
-            "Idle stays Idle — no flush in flight or queued to preserve"
-        );
-    }
-
-    // -- Phase 5 Step 3 Block C: re-injection invariant ---------------------
+    // -- Phase 6 — Block C (inherited from P5): re-injection invariant ---------------------
 
     #[test]
     fn prelude_is_stale_covers_the_three_reinjection_triggers() {
@@ -2417,28 +1787,16 @@ between
         assert!(!prelude_is_stale(Some("2026-05-23"), "2026-05-23"));
     }
 
-    // -- Phase 5 Step 3 Block C Part 6: regression cover for the glue --------
-
-    #[test]
-    fn should_trigger_compaction_only_on_full_persist_success() {
-        // Generic over the error types so we can build fake results without a
-        // real `tokio::task::JoinError`.
-        let success: Result<Result<usize, String>, String> = Ok(Ok(128));
-        let inner_err: Result<Result<usize, String>, String> = Ok(Err("io error".into()));
-        let outer_err: Result<Result<usize, String>, String> = Err("panic".into());
-        assert!(should_trigger_compaction(&success));
-        assert!(!should_trigger_compaction(&inner_err), "no trigger on persist io error");
-        assert!(!should_trigger_compaction(&outer_err), "no trigger on spawn_blocking panic");
-    }
+    // -- Phase 6 — Block C (inherited from P5): regression cover for the glue ----------------
 
     #[test]
     fn compose_with_prelude_is_pass_through_for_empty_and_prepends_otherwise() {
-        // Empty prelude (legit "no project-memory files yet" case) → no-op.
+        // Empty prelude (legit "no log entries yet" case) → no-op.
         assert_eq!(compose_with_prelude("", "hello".to_string()), "hello");
         // Non-empty prelude → prelude + blank line + text.
         assert_eq!(
-            compose_with_prelude("[Untrusted daily memory]\n…", "hello".to_string()),
-            "[Untrusted daily memory]\n…\n\nhello",
+            compose_with_prelude("[Untrusted memory recall]\n…", "hello".to_string()),
+            "[Untrusted memory recall]\n…\n\nhello",
         );
     }
 
@@ -2485,7 +1843,7 @@ between
 
     #[test]
     fn finalize_text_stale_empty_prelude_marks_fresh_but_does_not_prepend() {
-        // Legit "project has no project-memory files yet" — fetch succeeds
+        // Legit "agent has no log entries yet" — fetch succeeds
         // with an empty string. Don't prepend, but DO mark the thread fresh
         // so we don't refetch the empty string on every subsequent message.
         let (text, new_date) = finalize_text_with_prelude(
@@ -2500,7 +1858,7 @@ between
 
     #[test]
     fn finalize_text_stale_rpc_err_soft_fails_text_unchanged_state_unchanged() {
-        // Phase 5 Step 3 Block C Part 6 contract: a prelude-fetch failure
+        // Phase 6 — Block C (inherited from P5) Part 6 contract: a prelude-fetch failure
         // (sidecar gone, NDJSON timeout, RPC error, whatever) MUST NOT
         // block the real user / agent message. Soft fail → text passes
         // through unchanged. State STAYS stale so the next outgoing
@@ -2526,6 +1884,114 @@ between
         // Resumed thread (no kickoff this session) → unknown live context →
         // start `None` so the next outgoing message re-injects (trigger 3).
         assert_eq!(initial_prelude_date(false, "2026-05-23"), None);
+    }
+
+    // -- P6 Step 4 — Block C link-level chain --------------------------------
+
+    /// Walks the three Block C pieces sequentially — the real
+    /// `mark_prelude_stale_on_compaction` (which is the `thread/compacted`
+    /// arm's body), predicate flips stale, `finalize_text_with_prelude`
+    /// prepends + marks fresh — as one narrative the predicate-level tests
+    /// above leave at unit granularity.
+    ///
+    /// Binds to the **production function**, not a literal copy of the
+    /// state op — if a future change to the arm's body diverges from the
+    /// extracted fn, the real arm goes with it and this test catches no
+    /// drift. `spawn_consumer`'s full event loop and the Tauri RPC inside
+    /// `prepend_prelude_if_stale` aren't in scope here; everything else
+    /// on the chain is.
+    #[tokio::test]
+    async fn thread_compacted_clears_prelude_dates_then_next_message_reinjects() {
+        use std::collections::HashMap;
+        use tokio::sync::Mutex;
+
+        let prelude_dates: Mutex<HashMap<String, Option<String>>> =
+            Mutex::new(HashMap::new());
+        let thread = "thread-A".to_string();
+        let today = "2026-05-26";
+
+        // Initial state: kickoff put today's prelude in this thread's live
+        // context (the freshly-provisioned path).
+        prelude_dates
+            .lock()
+            .await
+            .insert(thread.clone(), Some(today.to_string()));
+
+        // Stretch 1 — fresh state, finalize is a no-op.
+        {
+            let current = prelude_dates
+                .lock()
+                .await
+                .get(&thread)
+                .cloned()
+                .flatten();
+            assert!(
+                !prelude_is_stale(current.as_deref(), today),
+                "fresh — no re-inject"
+            );
+            let (text, new_date) = finalize_text_with_prelude(
+                "first message".to_string(),
+                current.as_deref(),
+                today,
+                Ok("PRELUDE".to_string()),
+            );
+            assert_eq!(text, "first message");
+            assert_eq!(new_date, None);
+        }
+
+        // ★ Stretch 2 — `thread/compacted` arrives. Call the exact function
+        //    the real arm calls. Any future drift in the arm's body must go
+        //    through this function, and so the test stays bound to it.
+        mark_prelude_stale_on_compaction(&prelude_dates, &thread).await;
+
+        // Stretch 3 — next outgoing message: predicate sees stale, fetch
+        // succeeds, finalize prepends + signals "mark fresh".
+        let new_date_after_reinject = {
+            let current = prelude_dates
+                .lock()
+                .await
+                .get(&thread)
+                .cloned()
+                .flatten();
+            assert!(
+                prelude_is_stale(current.as_deref(), today),
+                "post-compacted — must be stale"
+            );
+            let (composed, new_date) = finalize_text_with_prelude(
+                "follow-up message".to_string(),
+                current.as_deref(),
+                today,
+                Ok("[Untrusted memory recall]\n…\n[/Untrusted memory recall]".to_string()),
+            );
+            assert!(
+                composed.starts_with("[Untrusted memory recall]"),
+                "composed = {composed}"
+            );
+            assert!(composed.contains("follow-up message"));
+            assert_eq!(new_date, Some(today.to_string()));
+            new_date
+        };
+
+        // Apply `new_date` back the way `prepend_prelude_if_stale` does on
+        // a successful re-injection.
+        prelude_dates
+            .lock()
+            .await
+            .insert(thread.clone(), new_date_after_reinject);
+
+        // Stretch 4 — subsequent same-day message is fresh again.
+        {
+            let current = prelude_dates
+                .lock()
+                .await
+                .get(&thread)
+                .cloned()
+                .flatten();
+            assert!(
+                !prelude_is_stale(current.as_deref(), today),
+                "post-reinject — fresh until next compaction or day rollover"
+            );
+        }
     }
 
     #[test]

@@ -62,7 +62,18 @@ impl Drop for FixtureRun {
         // Best-effort: kill the codex-app-server child + remove tempdir.
         // We can't .await in Drop; start_kill is sync.
         let _ = self.child.start_kill();
-        let _ = std::fs::remove_dir_all(&self.tempdir);
+        // P6 Step 5 — opt in via OPENCRAB_EVAL_KEEP_TEMPDIR to preserve the
+        // tempdir for post-run inspection (e.g. `<home>/.opencrab/agents/
+        // _eval/memory.db` for memory-tool fixtures). When set, also print
+        // the path to stderr so the caller can find it without grepping.
+        if std::env::var("OPENCRAB_EVAL_KEEP_TEMPDIR").is_ok() {
+            eprintln!(
+                "[opencrab-eval] OPENCRAB_EVAL_KEEP_TEMPDIR set — preserving tempdir: {}",
+                self.tempdir.display()
+            );
+        } else {
+            let _ = std::fs::remove_dir_all(&self.tempdir);
+        }
     }
 }
 
@@ -83,6 +94,7 @@ pub async fn run_fixture(ctx: &RunContext, fixture: &Fixture) -> Result<TurnResu
     let mut start_params = serde_json::Map::new();
     start_params.insert("cwd".to_string(), json!(cwd_str));
     start_params.insert("approvalPolicy".to_string(), json!("never"));
+    start_params.insert("sandbox".to_string(), json!("danger-full-access"));
     start_params.insert(
         "developerInstructions".to_string(),
         json!(run.developer_instructions),
@@ -102,18 +114,18 @@ pub async fn run_fixture(ctx: &RunContext, fixture: &Fixture) -> Result<TurnResu
         // generally and the spike's failure is something specific to
         // opencrab-team. If neither set surfaces, the diagnosis is
         // "qwen3.5-plus has no model metadata → MCP path degraded".
+        // The server resolves its own `~/.opencrab/agents/_eval/memory.db`
+        // from `--agent-id` (P6 Step 1) — no path passes through here.
         let memory_mcp_path = team_mcp_path
             .parent()
             .map(|p| p.join("opencrab-memory-mcp"))
             .filter(|p| p.exists());
         if let Some(memory_path) = memory_mcp_path {
-            let memory_dir = run.workspace_dir.join(".opencrab/agents/_eval/project-memory");
-            let _ = std::fs::create_dir_all(&memory_dir);
             mcp_cfg.insert(
                 "mcp_servers.opencrab-memory".to_string(),
                 json!({
                     "command": memory_path.to_string_lossy(),
-                    "args": ["--agent-id", "_eval", "--memory-dir", memory_dir.to_string_lossy()],
+                    "args": ["--agent-id", "_eval"],
                 }),
             );
         }

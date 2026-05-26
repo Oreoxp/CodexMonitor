@@ -138,6 +138,16 @@ async fn main() -> ExitCode {
                 println!("{}", turn.final_text);
                 println!("----");
                 println!();
+                // Step 26: dump every completed MCP tool call so external
+                // analysis can (a) classify text-tag-mode failures and
+                // (b) check tool-mode send_message bodies for `[From X]`
+                // contamination. One line per call, grep-friendly.
+                let calls = assertions::scan_mcp_tool_calls(&turn.notifications);
+                println!("MCP TOOL CALLS ({})", calls.len());
+                for (server, tool, args) in &calls {
+                    println!("TOOL_CALL  server={server}  tool={tool}  args={args}");
+                }
+                println!();
                 let outcome = (fixture.assert)(&turn);
                 if outcome.passed {
                     println!("VERDICT  ✓ PASS — {}", outcome.notes);

@@ -116,20 +116,18 @@ async fn handle_codex_start_thread(state: &AppState, params: &Value) -> Result<V
             }
         }
     }
-    // Phase 5 Step 2 — register the per-agent memory-search MCP server.
-    // codex's `thread/start` `config` map takes dotted-path config
-    // overrides; `mcp_servers.opencrab-memory` is merged into THIS thread's
-    // `Config.mcp_servers` before its session prompt is frozen, so the agent
-    // gets `memory_search` / `memory_get` tools scoped to its own
-    // `project-memory/` directory. Best-effort: if the binary cannot be
-    // located or the agent id is invalid, log and skip — the thread still
-    // starts, just without the memory-search tools.
+    // Phase 6 Step 1 — register the per-agent memory MCP server. codex's
+    // `thread/start` `config` map takes dotted-path config overrides;
+    // `mcp_servers.opencrab-memory` is merged into THIS thread's
+    // `Config.mcp_servers` before its session prompt is frozen, so the
+    // agent gets `log_progress` / `memory_search` / `memory_get` tools
+    // scoped to its own `~/.opencrab/agents/<id>/memory.db`. Best-effort:
+    // if the binary cannot be located or the agent id is invalid, log and
+    // skip — the thread still starts, just without the memory tools.
     if let Some(agent_id) = agent_id.as_deref() {
         match crate::memory_mcp_binary::resolve_memory_mcp_binary_path() {
             Ok(binary) => match crate::codex_spawn::build_memory_mcp_server_entry(
-                &binary,
-                agent_id,
-                std::path::Path::new(&workspace_path),
+                &binary, agent_id,
             ) {
                 Ok(entry) => {
                     let mut config = Map::new();

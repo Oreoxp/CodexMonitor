@@ -139,6 +139,14 @@ pub(crate) fn user_agent_memory_md(user_root: &Path, agent_id: &str) -> PathBuf 
     user_agent_dir(user_root, agent_id).join("MEMORY.md")
 }
 
+/// `~/.opencrab/agents/<agent_id>/memory.db` — per-agent SQLite log store
+/// for the P6 memory MCP server. Single-holder: the only writer/reader is
+/// `opencrab-memory-mcp` (one process per agent), so the file lives next to
+/// the agent's other identity assets in the user layer.
+pub(crate) fn user_agent_memory_db(user_root: &Path, agent_id: &str) -> PathBuf {
+    user_agent_dir(user_root, agent_id).join("memory.db")
+}
+
 // ===========================================================================
 // Project layer — `<cwd>/.opencrab/...`
 // ===========================================================================
@@ -181,26 +189,6 @@ pub(crate) fn project_agent_dir(project_root: &Path, agent_id: &str) -> PathBuf 
 /// `<cwd>/.opencrab/agents/<agent_id>/KANBAN.md`.
 pub(crate) fn project_agent_kanban_md(project_root: &Path, agent_id: &str) -> PathBuf {
     project_agent_dir(project_root, agent_id).join("KANBAN.md")
-}
-
-/// `<cwd>/.opencrab/agents/<agent_id>/project-memory/`.
-pub(crate) fn project_agent_memory_dir(project_root: &Path, agent_id: &str) -> PathBuf {
-    project_agent_dir(project_root, agent_id).join("project-memory")
-}
-
-/// `<cwd>/.opencrab/agents/<agent_id>/project-memory/<date>.md` — one
-/// per-agent daily-memory journal file. `date` is a `YYYY-MM-DD` stamp
-/// computed in the user's local timezone; this resolver is a pure join, so
-/// the caller owns the date formatting. Mirrors `paths.ts`
-/// `projectAgentMemoryFile`. The Phase 5 write layer (Step 3 Block B) is the
-/// consumer — the read layer enumerates the directory rather than naming
-/// files.
-pub(crate) fn project_agent_memory_file(
-    project_root: &Path,
-    agent_id: &str,
-    date: &str,
-) -> PathBuf {
-    project_agent_memory_dir(project_root, agent_id).join(format!("{date}.md"))
 }
 
 /// `<cwd>/.opencrab/team/` — team-shared markdown directory.
@@ -337,18 +325,13 @@ mod tests {
     }
 
     #[test]
-    fn project_agent_memory_file_names_date_md_under_memory_dir() {
-        // Pure join — env-independent. The daily-memory file lives directly
-        // inside the agent's `project-memory/` directory, named `<date>.md`.
-        let root = Path::new("/ws/.opencrab");
-        let file = project_agent_memory_file(root, "alice", "2026-05-22");
-        assert_eq!(
-            file,
-            project_agent_memory_dir(root, "alice").join("2026-05-22.md"),
-        );
-        assert_eq!(
-            file,
-            Path::new("/ws/.opencrab/agents/alice/project-memory/2026-05-22.md"),
-        );
+    fn user_agent_memory_db_sits_next_to_other_agent_files() {
+        // Pure join — env-independent. The per-agent SQLite log store lives
+        // directly under the agent's user-layer dir, alongside SOUL / MEMORY etc.
+        let root = Path::new("/home/u/.opencrab");
+        let db = user_agent_memory_db(root, "alice");
+        assert_eq!(db, user_agent_dir(root, "alice").join("memory.db"));
+        assert_eq!(db, Path::new("/home/u/.opencrab/agents/alice/memory.db"));
     }
+
 }

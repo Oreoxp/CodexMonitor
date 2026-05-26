@@ -295,38 +295,31 @@ fn ensure_agent_team_session_dir_propagates_validation_error() {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 5 Step 2 — build_memory_mcp_server_entry
+// Phase 6 Step 1 — build_memory_mcp_server_entry
 // ---------------------------------------------------------------------------
 
 #[test]
-fn build_memory_mcp_server_entry_bakes_agent_id_and_memory_dir() {
+fn build_memory_mcp_server_entry_bakes_agent_id_only() {
     let binary = Path::new("/opt/bin/opencrab-memory-mcp");
-    let entry = build_memory_mcp_server_entry(binary, "alice", Path::new("/ws"))
+    let entry = build_memory_mcp_server_entry(binary, "alice")
         .expect("entry builds for a valid agent id");
 
     // `command` is the resolved binary path.
     assert_eq!(entry["command"], binary.display().to_string());
 
-    // `args` carry the agent id + the agent's own project-memory directory,
-    // so each agent's spawned server is scoped to exactly its own memory.
-    let expected_dir = Path::new("/ws")
-        .join(".opencrab")
-        .join("agents")
-        .join("alice")
-        .join("project-memory")
-        .display()
-        .to_string();
+    // `args` carry only the agent id — the server resolves its own
+    // `~/.opencrab/agents/<id>/memory.db` from that (P6 Step 1).
     assert_eq!(
         entry["args"],
-        serde_json::json!(["--agent-id", "alice", "--memory-dir", expected_dir]),
+        serde_json::json!(["--agent-id", "alice"]),
     );
 }
 
 #[test]
-fn build_memory_mcp_server_entry_scopes_distinct_agents_to_distinct_dirs() {
+fn build_memory_mcp_server_entry_scopes_distinct_agents_to_distinct_args() {
     let binary = Path::new("/opt/bin/opencrab-memory-mcp");
-    let alice = build_memory_mcp_server_entry(binary, "alice", Path::new("/ws")).unwrap();
-    let bob = build_memory_mcp_server_entry(binary, "bob", Path::new("/ws")).unwrap();
+    let alice = build_memory_mcp_server_entry(binary, "alice").unwrap();
+    let bob = build_memory_mcp_server_entry(binary, "bob").unwrap();
     assert_ne!(alice["args"], bob["args"]);
 }
 
@@ -334,7 +327,7 @@ fn build_memory_mcp_server_entry_scopes_distinct_agents_to_distinct_dirs() {
 fn build_memory_mcp_server_entry_rejects_path_traversal_agent_id() {
     let binary = Path::new("/opt/bin/opencrab-memory-mcp");
     for evil in ["../escape", "a/b", "..", "."] {
-        let err = build_memory_mcp_server_entry(binary, evil, Path::new("/ws")).unwrap_err();
+        let err = build_memory_mcp_server_entry(binary, evil).unwrap_err();
         assert!(
             matches!(
                 err,

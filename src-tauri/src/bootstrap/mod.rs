@@ -76,7 +76,7 @@ rest is yours to fill in or leave blank.
 - Avatar:
 "#;
 const USER_TEMPLATE: &str = "# User Notes\n\n";
-const MEMORY_TEMPLATE: &str = "# Long-term Memory\n\n<!-- 跨项目长期记忆。dynamic 日记走 project-memory/YYYY-MM-DD.md(P5) -->\n";
+const MEMORY_TEMPLATE: &str = "# Long-term Memory\n\n<!-- 跨项目长期记忆。短期工作日志走 P6 memory.db,通过 log_progress / memory_search / memory_get 工具读写 -->\n";
 
 /// Render the IDENTITY.md seed for `agent_name`. Replaces the `{name}`
 /// placeholder in [`IDENTITY_TEMPLATE_FORMAT`] with the agent's display
@@ -360,7 +360,6 @@ pub(crate) fn ensure_project_layer_at(
             &crate::paths::project_agent_kanban_md(root, &agent.id),
             KANBAN_TEMPLATE,
         )?;
-        create_dir_all(&crate::paths::project_agent_memory_dir(root, &agent.id))?;
     }
 
     create_dir_all(&crate::paths::project_team_dir(root))?;

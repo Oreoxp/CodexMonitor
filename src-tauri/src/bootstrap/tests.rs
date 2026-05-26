@@ -306,7 +306,6 @@ fn project_layer_fresh_state_creates_dirs_and_templates() {
         let dir = root.join("agents").join(id);
         assert_dir(&dir);
         assert_file(&dir.join("KANBAN.md"), KANBAN_TEMPLATE);
-        assert_dir(&dir.join("project-memory"));
     }
     assert_file(&root.join("team/decisions.md"), DECISIONS_TEMPLATE);
     let events = root.join("teams").join(team_id).join("events.jsonl");

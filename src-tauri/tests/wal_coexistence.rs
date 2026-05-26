@@ -1,20 +1,34 @@
-// WAL coexistence smoke for the Step 1 (a) decision.
+// WAL coexistence smoke.
 //
-// What this test proves: the `tasks` table can live inside the same
+// Original (Phase 3): the `tasks` table can live inside the same
 // `state.sqlite` that LangGraph's SqliteSaver writes to, with two separate
 // SQLite client processes / connections concurrently writing, without
 // deadlocks or `SQLITE_BUSY` failures.
 //
-// Why it's at the rusqlite level, not the spawn-sidecar level: the actual
-// concern is the OS-level file-locking semantics of SQLite under WAL. Both
-// production writers (Rust's rusqlite, sidecar's better-sqlite3 driving
-// `@langchain/langgraph-checkpoint-sqlite`) link the same `libsqlite3`,
-// so the file-locking machinery is identical. Spawning the sidecar from
-// cargo test (npx tsx + npm install + NDJSON IPC handshake) would add a
-// lot of moving parts while exercising the same locking code path that
-// two threaded rusqlite Connections already exercise. The manual sidecar
-// recipe is documented in
-// `docs/scratch/investigation-wal-coexistence.md` for end-to-end paranoia.
+// Phase 6 Step 4 extension: the per-agent `memory.db` (single owner — the
+// `opencrab-memory-mcp` Rust binary writes; the Node sidecar's
+// `buildDailyMemoryPrelude` reads READ-ONLY) honors the same cross-process
+// WAL contract. The mcp-server-writer is exercised by spawning the real
+// binary; the sidecar-reader is simulated by a separate rusqlite
+// Connection running the exact `SELECT summary FROM log ORDER BY ts DESC
+// LIMIT 10` query `buildDailyMemoryPrelude` issues.
+//
+// Why a Rust reader is a valid proxy for the Node reader: rusqlite and
+// better-sqlite3 each bundle their own SQLite build (not the same shared
+// library). WAL's cross-process coordination, however, is a property of
+// the SQLite *file format* + the *OS-level* file-locking primitives
+// (`fcntl` / `LockFileEx`), not of any one client build. Both builds
+// honor the same on-disk format and the same OS lock byte ranges, so a
+// rusqlite reader's interaction with the mcp-server-writer over WAL is
+// the same contract a better-sqlite3 reader would face. (`state.sqlite`
+// in the §1 test uses the same logic for the two-Rust-writer case
+// against a sidecar that runs better-sqlite3 in production.)
+//
+// Spawning the actual Node sidecar from cargo test (npx tsx + npm install
+// + NDJSON IPC handshake) would add a lot of moving parts while
+// exercising the same locking code path. The manual sidecar recipe is
+// documented in `docs/scratch/investigation-wal-coexistence.md` for
+// end-to-end paranoia.
 //
 // Coverage target (from the Step 2 spec):
 //   - sidecar-shaped writer creates state.sqlite first → checkpoint family
@@ -281,4 +295,155 @@ fn wal_pragma_persists_across_close_and_reopen() {
         .query_row("PRAGMA journal_mode", [], |row| row.get(0))
         .unwrap();
     assert_eq!(mode.to_lowercase(), "wal");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6 Step 4 — memory.db writer-process × reader-process coexistence
+// ---------------------------------------------------------------------------
+
+/// Drives the real `opencrab-memory-mcp` binary as the writer process and a
+/// separate `rusqlite::Connection` as the reader. The rusqlite reader is a
+/// valid proxy for Node's `better-sqlite3` reader — rusqlite and
+/// better-sqlite3 each bundle their own SQLite, but WAL's cross-process
+/// coordination is a property of the file format + OS-level file locking,
+/// not the linked SQLite build, so both clients face the same contract.
+/// Asserts that:
+///
+///   * a separate reader can query memory.db **while the writer process is
+///     still alive**, without `SQLITE_BUSY` (true cross-process WAL),
+///   * the exact `SELECT summary FROM log ORDER BY ts DESC LIMIT 10` query
+///     that `buildDailyMemoryPrelude` (Node side) runs returns the 10
+///     newest summaries the writer just committed, in DESC order,
+///   * after the writer exits, the reader still sees a consistent file
+///     and `PRAGMA journal_mode` is still `wal`.
+///
+/// This is the Rust-side proof of the cross-side B.1 claim ("Rust writer
+/// × Node reader on the same WAL memory.db"). The TS-side
+/// `buildDailyMemoryPrelude` is exercised against a Node-seeded mcp-shape
+/// schema in `sidecar/src/prompt/daily-memory.test.ts`; this test pins
+/// that the schema that side reads matches the schema the Rust writer
+/// actually produces, byte-for-byte at the row level.
+#[tokio::test]
+async fn memory_db_wal_writer_process_and_reader_process_coexist() {
+    use rmcp::model::CallToolRequestParams;
+    use rmcp::serve_client;
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    tokio::time::timeout(Duration::from_secs(40), async {
+        let home = TempDir::new().expect("tempdir");
+        let agent = "wal_coex";
+        let db_path = home
+            .path()
+            .join(".opencrab")
+            .join("agents")
+            .join(agent)
+            .join("memory.db");
+
+        // Spawn the real binary as the writer process. HOME-override keeps
+        // the file under our tempdir, not the developer's real home.
+        let binary = env!("CARGO_BIN_EXE_opencrab-memory-mcp");
+        let mut child = tokio::process::Command::new(binary)
+            .args(["--agent-id", agent])
+            .env("HOME", home.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn opencrab-memory-mcp");
+        let stdout = child.stdout.take().expect("stdout");
+        let stdin = child.stdin.take().expect("stdin");
+        let client = serve_client((), (stdout, stdin))
+            .await
+            .expect("mcp handshake");
+
+        // 12 commits via the real mcp protocol — more than the 10-entry
+        // prelude window so we can confirm the SELECT … DESC LIMIT 10 query
+        // does its own dropping at the SQL layer rather than relying on
+        // the writer side capping anything.
+        for i in 0..12 {
+            let mut args = serde_json::Map::new();
+            args.insert(
+                "summary".to_string(),
+                serde_json::Value::from(format!("entry {i:02}")),
+            );
+            args.insert(
+                "detail".to_string(),
+                serde_json::Value::from(format!("detail body for entry {i:02}")),
+            );
+            client
+                .call_tool(CallToolRequestParams {
+                    meta: None,
+                    name: "log_progress".into(),
+                    arguments: Some(args),
+                    task: None,
+                })
+                .await
+                .expect("tools/call log_progress");
+        }
+
+        // ★ Concurrent read — writer process is STILL ALIVE. A SQLITE_BUSY
+        //   here would falsify the WAL-coexistence claim. Same query
+        //   `buildDailyMemoryPrelude` runs; same single-column projection.
+        assert!(db_path.exists(), "memory.db must exist after first commit");
+        let reader = Connection::open(&db_path).expect("reader open memory.db");
+        let mode: String = reader
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("read journal_mode");
+        assert_eq!(mode.to_lowercase(), "wal", "writer set WAL on first open");
+
+        let summaries_during_writer_alive: Vec<String> = reader
+            .prepare("SELECT summary FROM log ORDER BY ts DESC LIMIT 10")
+            .expect("prepare select")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query")
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            summaries_during_writer_alive.len(),
+            10,
+            "exactly the 10 newest survive the LIMIT 10",
+        );
+        // ts is wall-clock from `current_time_ms()` at insert; per-iteration
+        // sleeping would slow the test, but the 12 inserts run sequentially
+        // and `id` increases monotonically with `ts` — so DESC by ts orders
+        // entries 11, 10, 9, … 2, dropping 0 and 1 (the oldest two).
+        assert_eq!(summaries_during_writer_alive[0], "entry 11");
+        assert_eq!(summaries_during_writer_alive[9], "entry 02");
+        for survivor in 2..=11 {
+            let label = format!("entry {survivor:02}");
+            assert!(
+                summaries_during_writer_alive.contains(&label),
+                "expected {label} among the 10 newest; got {summaries_during_writer_alive:?}"
+            );
+        }
+        // The two oldest must have been dropped by the LIMIT.
+        assert!(!summaries_during_writer_alive.contains(&"entry 00".to_string()));
+        assert!(!summaries_during_writer_alive.contains(&"entry 01".to_string()));
+
+        drop(reader);
+        drop(client);
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+
+        // Post-shutdown re-open: file is consistent, WAL still set in the
+        // header, query yields the same 10 rows. This is the steady-state
+        // the sidecar's read path lands in after the mcp server has done
+        // its work and gone idle.
+        let post = Connection::open(&db_path).expect("post-shutdown open");
+        let mode: String = post
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("read journal_mode");
+        assert_eq!(mode.to_lowercase(), "wal");
+        let summaries_post: Vec<String> = post
+            .prepare("SELECT summary FROM log ORDER BY ts DESC LIMIT 10")
+            .expect("prepare select")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query")
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(summaries_post, summaries_during_writer_alive);
+    })
+    .await
+    .expect("memory.db wal coexistence test timed out");
 }

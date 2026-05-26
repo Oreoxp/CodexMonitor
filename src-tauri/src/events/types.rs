@@ -67,21 +67,6 @@ pub(crate) enum TeamEventBody {
     TaskArchived {
         archived_by: String,
     },
-    /// Phase 5 Step 3 — a pre-compaction memory flush completed for an agent.
-    /// Not task-scoped: `TeamEvent.task_id` stays `None`. This is the durable,
-    /// auditable record that the flush turn-pair was housekeeping (a later
-    /// phase's UI re-build reads it to suppress the flush from the chat).
-    MemoryFlush {
-        agent_id: String,
-        /// The codex turn id of the flush turn (the system-issued user-role
-        /// message that asked for `<daily_log>`). Carried so a later phase
-        /// can correlate this audit row with the chat event stream — codex
-        /// will emit `item/started` + `turn/completed` for the flush turn,
-        /// and the UI re-build needs the turn id to suppress that pair from
-        /// the chat.
-        flush_turn_id: String,
-        chars_written: usize,
-    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

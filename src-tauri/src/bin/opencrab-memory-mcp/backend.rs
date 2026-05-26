@@ -1,19 +1,26 @@
-// Phase 5 Step 2 — daily-memory search backend for `opencrab-memory-mcp`.
+// Phase 6 Step 1 — per-agent SQLite log store for `opencrab-memory-mcp`.
 //
-// Read-only. The corpus is ONE agent's `project-memory/<YYYY-MM-DD>.md`
-// journal files. `search` builds a throwaway in-memory SQLite FTS5 index on
-// every call and discards it — the markdown files are the only source of
-// truth, so a persistent index would only add staleness; the corpus is a
-// handful of small files, so a rebuild is sub-millisecond. `get` reads one
-// day's file directly.
+// Storage layer: one SQLite file per agent at
+// `~/.opencrab/agents/<id>/memory.db`. This server is the file's sole
+// owner — no other process reads or writes it — so the schema is created
+// idempotently here at open time, and the FTS5 index is persistent (no
+// per-call rebuild). WAL is asserted on every open so that any later
+// read-only client (a future Phase 6/7 step) can attach without blocking us.
 //
-// Index granularity: paragraph — a blank-line-delimited block. One FTS5 row
-// per paragraph, so a search hit maps to a single self-contained paragraph
-// that becomes the snippet. Blank-line splitting makes no assumption about
-// the day file's internal markdown structure (that format is owned by the
-// Phase 5 write layer, a later step).
+// Tools surface (consumed by `server.rs`):
+//   * `log_progress(summary, detail?)` — write tool, structured (no text
+//     tags). One row per call; `ts` is captured here as epoch ms.
+//   * `search(query, limit)` — full-text search over `detail` via the
+//     `log_fts` virtual table; bm25-ranked hits join back to `log` to
+//     return id / ts / summary / detail snippet.
+//   * `get(id)` — fetch one full `log` row by primary key.
+//
+// FTS5 uses external-content (`content='log', content_rowid='id'`): `log`
+// stays the truth source, `log_fts` is just an index, and three standard
+// triggers (`AFTER INSERT|UPDATE|DELETE ON log`) keep it in sync.
 
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection};
 use serde::Serialize;
@@ -22,42 +29,43 @@ use serde::Serialize;
 const DEFAULT_SEARCH_LIMIT: usize = 6;
 /// Hard cap on `limit` so one call cannot pull the whole archive.
 const MAX_SEARCH_LIMIT: usize = 25;
-/// Per-snippet character cap. Paragraph-granular snippets are normally well
-/// under this; the cap only guards against one pathologically long block.
+/// Per-snippet character cap. The `detail` column is free-form, so a
+/// pathological entry should not flood one search response.
 const MAX_SNIPPET_CHARS: usize = 800;
 
-/// One search hit: the day it came from + the matched paragraph.
+/// One search hit: a row of `log`, with `detail` truncated to a snippet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MemoryHit {
-    pub date: String,
+    pub id: i64,
+    pub ts: i64,
+    pub summary: String,
     pub snippet: String,
 }
 
-/// A whole day's journal, as returned by `get`.
+/// One full log entry, as returned by `get`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct MemoryDocument {
-    pub date: String,
+pub struct MemoryEntry {
+    pub id: i64,
     pub found: bool,
-    pub content: String,
+    pub ts: i64,
+    pub summary: String,
+    pub detail: Option<String>,
 }
 
 #[derive(Debug)]
 pub enum BackendError {
-    /// `date` was not a `YYYY-MM-DD` stamp — rejected before any path join
-    /// (this is the path-traversal guard for `get`).
-    InvalidDate(String),
     Io(std::io::Error),
     Sqlite(rusqlite::Error),
+    /// `log_progress` was called with an empty summary.
+    EmptySummary,
 }
 
 impl std::fmt::Display for BackendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BackendError::InvalidDate(d) => {
-                write!(f, "date must be a YYYY-MM-DD stamp, got {d:?}")
-            }
             BackendError::Io(e) => write!(f, "memory I/O error: {e}"),
-            BackendError::Sqlite(e) => write!(f, "memory index error: {e}"),
+            BackendError::Sqlite(e) => write!(f, "memory store error: {e}"),
+            BackendError::EmptySummary => write!(f, "summary must be a non-empty string"),
         }
     }
 }
@@ -85,45 +93,71 @@ pub fn clamp_limit(requested: Option<u64>) -> usize {
     }
 }
 
-/// Full-text search the agent's daily-memory archive. Returns the most
-/// relevant paragraphs (bm25-ranked, best first), each tagged with its date.
-/// An absent / empty `memory_dir`, or a `query` with no usable terms, yields
-/// an empty result rather than an error.
+/// Open `memory_db`, set WAL, and ensure the schema (idempotent).
+/// Creates the parent directory if it does not exist.
+pub fn open(memory_db: &Path) -> Result<Connection, BackendError> {
+    if let Some(parent) = memory_db.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let conn = Connection::open(memory_db)?;
+    // WAL persists in the file header once set, but re-asserting it on every
+    // open keeps cross-process coexistence safe (see CLAUDE.md storage rule:
+    // any future SQLite client on this file MUST also pragma WAL).
+    let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+    migrate(&conn)?;
+    Ok(conn)
+}
+
+/// Insert one log row. Returns the new row's id. `ts` is captured here.
+pub fn log_progress(
+    memory_db: &Path,
+    summary: &str,
+    detail: Option<&str>,
+) -> Result<i64, BackendError> {
+    let summary = summary.trim();
+    if summary.is_empty() {
+        return Err(BackendError::EmptySummary);
+    }
+    let conn = open(memory_db)?;
+    let ts = current_time_ms();
+    conn.execute(
+        "INSERT INTO log(ts, summary, detail) VALUES (?1, ?2, ?3)",
+        params![ts, summary, detail],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Full-text search the agent's log store. Returns the most relevant rows
+/// (bm25-ranked, best first). A query with no usable terms returns an empty
+/// list rather than an error.
 pub fn search(
-    memory_dir: &Path,
+    memory_db: &Path,
     query: &str,
     limit: usize,
 ) -> Result<Vec<MemoryHit>, BackendError> {
     let Some(match_expr) = build_fts_match(query) else {
         return Ok(Vec::new());
     };
-    let corpus = load_corpus(memory_dir)?;
-    if corpus.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let conn = Connection::open_in_memory()?;
-    conn.execute_batch("CREATE VIRTUAL TABLE mem USING fts5(date UNINDEXED, body);")?;
-    {
-        let mut insert = conn.prepare("INSERT INTO mem(date, body) VALUES (?1, ?2)")?;
-        for (date, paragraphs) in &corpus {
-            for paragraph in paragraphs {
-                insert.execute(params![date, paragraph])?;
-            }
-        }
-    }
-
-    let mut stmt = conn
-        .prepare("SELECT date, body FROM mem WHERE mem MATCH ?1 ORDER BY bm25(mem) LIMIT ?2")?;
+    let conn = open(memory_db)?;
+    let mut stmt = conn.prepare(
+        "SELECT log.id, log.ts, log.summary, log.detail \
+         FROM log_fts JOIN log ON log.id = log_fts.rowid \
+         WHERE log_fts MATCH ?1 \
+         ORDER BY bm25(log_fts) \
+         LIMIT ?2",
+    )?;
     let rows = stmt.query_map(params![match_expr, limit as i64], |row| {
-        let date: String = row.get(0)?;
-        let body: String = row.get(1)?;
+        let id: i64 = row.get(0)?;
+        let ts: i64 = row.get(1)?;
+        let summary: String = row.get(2)?;
+        let detail: Option<String> = row.get(3)?;
         Ok(MemoryHit {
-            date,
-            snippet: truncate_snippet(&body),
+            id,
+            ts,
+            summary,
+            snippet: truncate_snippet(detail.as_deref().unwrap_or("")),
         })
     })?;
-
     let mut hits = Vec::new();
     for hit in rows {
         hits.push(hit?);
@@ -131,108 +165,78 @@ pub fn search(
     Ok(hits)
 }
 
-/// Return one full day of the agent's journal. `date` must be a
-/// `YYYY-MM-DD` stamp — anything else is rejected up front so a crafted
-/// argument cannot escape `memory_dir`. A date with no file on disk is a
-/// normal `found: false` result, not an error.
-pub fn get(memory_dir: &Path, date: &str) -> Result<MemoryDocument, BackendError> {
-    if !is_date_stamp(date) {
-        return Err(BackendError::InvalidDate(date.to_string()));
-    }
-    let path = memory_dir.join(format!("{date}.md"));
-    match std::fs::read_to_string(&path) {
-        Ok(content) => Ok(MemoryDocument {
-            date: date.to_string(),
-            found: true,
-            content,
-        }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(MemoryDocument {
-            date: date.to_string(),
-            found: false,
-            content: String::new(),
-        }),
-        Err(e) => Err(BackendError::Io(e)),
-    }
+/// Fetch one log row by id. A missing id is a normal `found: false` result,
+/// not an error.
+pub fn get(memory_db: &Path, id: i64) -> Result<MemoryEntry, BackendError> {
+    let conn = open(memory_db)?;
+    let mut stmt =
+        conn.prepare("SELECT id, ts, summary, detail FROM log WHERE id = ?1")?;
+    let row = stmt
+        .query_row(params![id], |row| {
+            let id: i64 = row.get(0)?;
+            let ts: i64 = row.get(1)?;
+            let summary: String = row.get(2)?;
+            let detail: Option<String> = row.get(3)?;
+            Ok(MemoryEntry {
+                id,
+                found: true,
+                ts,
+                summary,
+                detail,
+            })
+        })
+        .map(Some)
+        .or_else(|err| match err {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })?;
+    Ok(row.unwrap_or(MemoryEntry {
+        id,
+        found: false,
+        ts: 0,
+        summary: String::new(),
+        detail: None,
+    }))
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Read every `YYYY-MM-DD.md` file under `memory_dir` and split each into
-/// non-empty paragraphs. A missing directory yields an empty corpus.
-fn load_corpus(memory_dir: &Path) -> Result<Vec<(String, Vec<String>)>, BackendError> {
-    let entries = match std::fs::read_dir(memory_dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(BackendError::Io(e)),
-    };
-    let mut corpus: Vec<(String, Vec<String>)> = Vec::new();
-    for entry in entries {
-        let entry = entry?;
-        let file_name = entry.file_name();
-        let Some(date) = date_from_filename(&file_name.to_string_lossy()) else {
-            continue;
-        };
-        let content = match std::fs::read_to_string(entry.path()) {
-            Ok(content) => content,
-            // A file deleted between readdir and read is simply skipped.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(BackendError::Io(e)),
-        };
-        let paragraphs = split_paragraphs(&content);
-        if !paragraphs.is_empty() {
-            corpus.push((date, paragraphs));
-        }
-    }
-    // Deterministic (newest-first) order. bm25 decides the final ranking, but
-    // a stable corpus keeps insert order — and bm25 ties — reproducible.
-    corpus.sort_by(|a, b| b.0.cmp(&a.0));
-    Ok(corpus)
+/// Create the `log` table, the `log_fts` virtual table, and the three
+/// sync triggers if they do not already exist.
+fn migrate(conn: &Connection) -> Result<(), BackendError> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS log (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts      INTEGER NOT NULL,
+            summary TEXT    NOT NULL,
+            detail  TEXT
+        );
+        CREATE VIRTUAL TABLE IF NOT EXISTS log_fts USING fts5(
+            detail,
+            content='log',
+            content_rowid='id'
+        );
+        CREATE TRIGGER IF NOT EXISTS log_ai AFTER INSERT ON log BEGIN
+            INSERT INTO log_fts(rowid, detail) VALUES (new.id, new.detail);
+        END;
+        CREATE TRIGGER IF NOT EXISTS log_ad AFTER DELETE ON log BEGIN
+            INSERT INTO log_fts(log_fts, rowid, detail) VALUES('delete', old.id, old.detail);
+        END;
+        CREATE TRIGGER IF NOT EXISTS log_au AFTER UPDATE ON log BEGIN
+            INSERT INTO log_fts(log_fts, rowid, detail) VALUES('delete', old.id, old.detail);
+            INSERT INTO log_fts(rowid, detail) VALUES (new.id, new.detail);
+        END;",
+    )?;
+    Ok(())
 }
 
-/// `true` iff `s` is exactly `dddd-dd-dd`. Used both to pick journal files
-/// out of the directory and to validate the `get` argument.
-fn is_date_stamp(s: &str) -> bool {
-    let bytes = s.as_bytes();
-    bytes.len() == 10
-        && bytes.iter().enumerate().all(|(i, &c)| match i {
-            4 | 7 => c == b'-',
-            _ => c.is_ascii_digit(),
-        })
-}
-
-fn date_from_filename(name: &str) -> Option<String> {
-    let stem = name.strip_suffix(".md")?;
-    is_date_stamp(stem).then(|| stem.to_string())
-}
-
-/// Split text into paragraphs — maximal runs of non-blank lines, each
-/// trimmed. Empty paragraphs are dropped. `str::lines` already normalizes
-/// `\r\n`, so this is newline-style agnostic.
-fn split_paragraphs(content: &str) -> Vec<String> {
-    let mut paragraphs = Vec::new();
-    let mut current = String::new();
-    for line in content.lines() {
-        if line.trim().is_empty() {
-            flush_paragraph(&mut current, &mut paragraphs);
-        } else {
-            if !current.is_empty() {
-                current.push('\n');
-            }
-            current.push_str(line);
-        }
-    }
-    flush_paragraph(&mut current, &mut paragraphs);
-    paragraphs
-}
-
-fn flush_paragraph(current: &mut String, out: &mut Vec<String>) {
-    let trimmed = current.trim();
-    if !trimmed.is_empty() {
-        out.push(trimmed.to_string());
-    }
-    current.clear();
+fn current_time_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// Turn a free-text query into an FTS5 MATCH expression. Each whitespace
@@ -268,137 +272,200 @@ fn truncate_snippet(body: &str) -> String {
 mod tests {
     use super::*;
 
-    fn seed(dir: &Path, date: &str, body: &str) {
-        std::fs::write(dir.join(format!("{date}.md")), body).expect("seed day file");
+    fn db_path() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("nested/memory.db");
+        (tmp, path)
     }
 
     #[test]
-    fn search_finds_a_seeded_term() {
-        let tmp = tempfile::tempdir().unwrap();
-        seed(tmp.path(), "2026-05-20", "We adopted the Postgres migration plan.");
-        seed(tmp.path(), "2026-05-10", "Unrelated standup notes about lunch.");
-
-        let hits = search(tmp.path(), "Postgres", 6).unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].date, "2026-05-20");
-        assert!(hits[0].snippet.contains("Postgres migration"));
+    fn schema_creation_is_idempotent() {
+        let (_tmp, db) = db_path();
+        // First open: creates parent dir, file, schema.
+        drop(open(&db).unwrap());
+        assert!(db.exists(), "open must create the db file");
+        // Second open against the same file: must not error and must not
+        // recreate or duplicate any object.
+        let conn = open(&db).unwrap();
+        let table_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='log'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_count, 1);
+        let trigger_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'log_%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(trigger_count, 3);
     }
 
     #[test]
-    fn search_ranks_the_more_relevant_paragraph_first_via_bm25() {
-        let tmp = tempfile::tempdir().unwrap();
-        // 2026-05-20 matches BOTH query terms; 2026-05-10 matches only one.
-        seed(
-            tmp.path(),
-            "2026-05-20",
-            "We chose the alpha approach over beta after the review.",
+    fn open_sets_wal_journal_mode() {
+        let (_tmp, db) = db_path();
+        let conn = open(&db).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode.to_lowercase(), "wal");
+    }
+
+    #[test]
+    fn log_progress_inserts_summary_only() {
+        let (_tmp, db) = db_path();
+        let id = log_progress(&db, "wrote a kickoff plan", None).unwrap();
+        assert!(id > 0);
+        let entry = get(&db, id).unwrap();
+        assert!(entry.found);
+        assert_eq!(entry.id, id);
+        assert_eq!(entry.summary, "wrote a kickoff plan");
+        assert_eq!(entry.detail, None);
+        assert!(entry.ts > 0);
+    }
+
+    #[test]
+    fn log_progress_inserts_summary_and_detail() {
+        let (_tmp, db) = db_path();
+        let id = log_progress(
+            &db,
+            "shipped auth refactor",
+            Some("Replaced the legacy session middleware with the JWT/OAuth flow."),
+        )
+        .unwrap();
+        let entry = get(&db, id).unwrap();
+        assert!(entry.found);
+        assert_eq!(entry.summary, "shipped auth refactor");
+        assert_eq!(
+            entry.detail.as_deref(),
+            Some("Replaced the legacy session middleware with the JWT/OAuth flow.")
         );
-        seed(tmp.path(), "2026-05-10", "Logged a few alpha notes.");
+    }
 
-        let hits = search(tmp.path(), "alpha beta", 6).unwrap();
+    #[test]
+    fn log_progress_trims_summary_and_rejects_empty() {
+        let (_tmp, db) = db_path();
+        assert!(matches!(
+            log_progress(&db, "", None),
+            Err(BackendError::EmptySummary)
+        ));
+        assert!(matches!(
+            log_progress(&db, "   \n\t  ", None),
+            Err(BackendError::EmptySummary)
+        ));
+        // Trim is applied so leading/trailing whitespace does not survive.
+        let id = log_progress(&db, "  trimmed ok  ", None).unwrap();
+        assert_eq!(get(&db, id).unwrap().summary, "trimmed ok");
+    }
+
+    #[test]
+    fn fts_round_trip_search_then_get() {
+        let (_tmp, db) = db_path();
+        let id_a = log_progress(
+            &db,
+            "auth refactor day 1",
+            Some("Refactored the OAuth middleware to use the new token model."),
+        )
+        .unwrap();
+        let _id_b = log_progress(
+            &db,
+            "lunch break notes",
+            Some("Unrelated standup notes about lunch and the cafeteria."),
+        )
+        .unwrap();
+
+        let hits = search(&db, "OAuth", 6).unwrap();
+        assert_eq!(hits.len(), 1, "hits = {hits:?}");
+        assert_eq!(hits[0].id, id_a);
+        assert_eq!(hits[0].summary, "auth refactor day 1");
+        assert!(
+            hits[0].snippet.contains("OAuth"),
+            "snippet = {}",
+            hits[0].snippet
+        );
+        assert!(hits[0].ts > 0);
+
+        let entry = get(&db, id_a).unwrap();
+        assert!(entry.found);
+        assert_eq!(
+            entry.detail.as_deref(),
+            Some("Refactored the OAuth middleware to use the new token model.")
+        );
+    }
+
+    #[test]
+    fn search_ranks_more_relevant_first_via_bm25() {
+        let (_tmp, db) = db_path();
+        let id_two = log_progress(
+            &db,
+            "review alpha vs beta",
+            Some("We chose the alpha approach over beta after the review."),
+        )
+        .unwrap();
+        let id_one =
+            log_progress(&db, "tiny note", Some("Logged a few alpha notes.")).unwrap();
+
+        let hits = search(&db, "alpha beta", 6).unwrap();
         assert_eq!(hits.len(), 2);
-        // bm25 ranks the two-term match above the one-term match.
-        assert_eq!(hits[0].date, "2026-05-20");
-        assert_eq!(hits[1].date, "2026-05-10");
-    }
-
-    #[test]
-    fn search_snippet_is_the_whole_matched_paragraph() {
-        let tmp = tempfile::tempdir().unwrap();
-        // Two paragraphs; only the second mentions the term.
-        seed(
-            tmp.path(),
-            "2026-05-20",
-            "Morning: triaged the inbox.\n\nAfternoon: shipped the auth refactor.",
-        );
-
-        let hits = search(tmp.path(), "auth", 6).unwrap();
-        assert_eq!(hits.len(), 1);
-        // The hit is the matched paragraph, self-contained — not the whole file.
-        assert_eq!(hits[0].snippet, "Afternoon: shipped the auth refactor.");
-    }
-
-    #[test]
-    fn search_returns_empty_when_directory_is_absent() {
-        let tmp = tempfile::tempdir().unwrap();
-        let missing = tmp.path().join("project-memory");
-        assert_eq!(search(&missing, "anything", 6).unwrap(), Vec::new());
-    }
-
-    #[test]
-    fn search_returns_empty_for_empty_and_blank_corpora() {
-        let tmp = tempfile::tempdir().unwrap();
-        // Empty directory.
-        assert_eq!(search(tmp.path(), "anything", 6).unwrap(), Vec::new());
-        // Directory with only whitespace-only files.
-        seed(tmp.path(), "2026-05-20", "   \n\n  \t\n");
-        assert_eq!(search(tmp.path(), "anything", 6).unwrap(), Vec::new());
+        assert_eq!(hits[0].id, id_two, "two-term match must rank first");
+        assert_eq!(hits[1].id, id_one);
     }
 
     #[test]
     fn search_returns_empty_for_query_with_no_searchable_terms() {
-        let tmp = tempfile::tempdir().unwrap();
-        seed(tmp.path(), "2026-05-20", "Real content here.");
-        assert_eq!(search(tmp.path(), "  !!!  ??? ", 6).unwrap(), Vec::new());
+        let (_tmp, db) = db_path();
+        log_progress(&db, "real entry", Some("Real content here.")).unwrap();
+        assert_eq!(search(&db, "  !!!  ??? ", 6).unwrap(), Vec::new());
     }
 
     #[test]
-    fn search_ignores_non_journal_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        seed(tmp.path(), "2026-05-20", "journal mentions widgets");
-        std::fs::write(tmp.path().join("notes.md"), "stray widgets file").unwrap();
-        std::fs::write(tmp.path().join("2026-05-20.txt"), "wrong widgets ext").unwrap();
-
-        let hits = search(tmp.path(), "widgets", 6).unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].date, "2026-05-20");
+    fn search_returns_empty_on_fresh_db() {
+        let (_tmp, db) = db_path();
+        assert_eq!(search(&db, "anything", 6).unwrap(), Vec::new());
     }
 
     #[test]
     fn search_respects_the_limit() {
-        let tmp = tempfile::tempdir().unwrap();
-        for day in 10..20 {
-            seed(tmp.path(), &format!("2026-05-{day}"), "shared keyword line");
+        let (_tmp, db) = db_path();
+        for n in 0..10 {
+            log_progress(
+                &db,
+                &format!("entry {n}"),
+                Some("shared keyword line one keyword line"),
+            )
+            .unwrap();
         }
-        let hits = search(tmp.path(), "keyword", 3).unwrap();
+        let hits = search(&db, "keyword", 3).unwrap();
         assert_eq!(hits.len(), 3);
     }
 
     #[test]
-    fn get_returns_full_content_for_an_existing_day() {
-        let tmp = tempfile::tempdir().unwrap();
-        seed(tmp.path(), "2026-05-20", "Line one.\n\nLine two.");
-        let doc = get(tmp.path(), "2026-05-20").unwrap();
-        assert!(doc.found);
-        assert_eq!(doc.date, "2026-05-20");
-        assert_eq!(doc.content, "Line one.\n\nLine two.");
+    fn search_skips_rows_with_null_detail() {
+        let (_tmp, db) = db_path();
+        // summary-only rows are intentionally not full-text searchable.
+        log_progress(&db, "keyword in summary only", None).unwrap();
+        assert_eq!(search(&db, "keyword", 6).unwrap(), Vec::new());
     }
 
     #[test]
-    fn get_reports_not_found_for_a_day_with_no_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let doc = get(tmp.path(), "2026-01-01").unwrap();
-        assert!(!doc.found);
-        assert_eq!(doc.content, "");
+    fn get_reports_not_found_for_unknown_id() {
+        let (_tmp, db) = db_path();
+        let entry = get(&db, 999).unwrap();
+        assert!(!entry.found);
+        assert_eq!(entry.id, 999);
+        assert_eq!(entry.summary, "");
+        assert_eq!(entry.detail, None);
     }
 
     #[test]
-    fn get_rejects_non_date_arguments_as_path_traversal_guard() {
-        let tmp = tempfile::tempdir().unwrap();
-        for bad in ["../../etc/passwd", "2026-05", "not-a-date", ""] {
-            assert!(
-                matches!(get(tmp.path(), bad), Err(BackendError::InvalidDate(_))),
-                "expected InvalidDate for {bad:?}",
-            );
-        }
-    }
-
-    #[test]
-    fn split_paragraphs_breaks_on_blank_lines() {
-        assert_eq!(
-            split_paragraphs("a\nb\n\n\nc\n"),
-            vec!["a\nb".to_string(), "c".to_string()],
-        );
-        assert_eq!(split_paragraphs("   \n\n  "), Vec::<String>::new());
+    fn clamp_limit_defaults_and_bounds() {
+        assert_eq!(clamp_limit(None), DEFAULT_SEARCH_LIMIT);
+        assert_eq!(clamp_limit(Some(0)), 1);
+        assert_eq!(clamp_limit(Some(1)), 1);
+        assert_eq!(clamp_limit(Some(9999)), MAX_SEARCH_LIMIT);
     }
 }

@@ -243,7 +243,7 @@ fn scan_propose_plan_blocks(text: &str) -> Vec<&str> {
 
 /// Scan a notification stream for completed MCP tool calls. Returns
 /// `(server, tool, arguments)` triples in document order.
-fn scan_mcp_tool_calls(notifs: &[(String, Value)]) -> Vec<(String, String, Value)> {
+pub fn scan_mcp_tool_calls(notifs: &[(String, Value)]) -> Vec<(String, String, Value)> {
     let mut out = Vec::new();
     for (method, params) in notifs {
         if method != "item/completed" {
@@ -411,6 +411,77 @@ pub fn qa_calls_send_message_no_modifying_tool(turn: &TurnResult) -> AssertionOu
         "QA called send_message ({} call(s)) with finding-language; no modifying tools",
         send_calls.len()
     ))
+}
+
+// ---------------------------------------------------------------------------
+// P6 Step 5 — b1 probe assertions for memory tool calls
+// ---------------------------------------------------------------------------
+
+/// b1-probe-write — agent should call `log_progress` at least once after a
+/// substantive decision + explicit "remember for tomorrow" cue. Also pins
+/// that the dead P5 `<daily_log>` tag never appears in `final_text`.
+pub fn pm_logs_progress_after_decision(turn: &TurnResult) -> AssertionOutcome {
+    if turn.final_text.contains("<daily_log>") {
+        return AssertionOutcome::fail(
+            "final_text contains the dead P5 `<daily_log>` tag — must be 0 (replaced by \
+             log_progress tool in P6)",
+        );
+    }
+    let calls = scan_mcp_tool_calls(&turn.notifications);
+    let log_calls: Vec<&(String, String, Value)> =
+        calls.iter().filter(|(_, tool, _)| tool == "log_progress").collect();
+    if log_calls.is_empty() {
+        return AssertionOutcome::fail(
+            "no log_progress tool call — agent didn't record the decision for its future self",
+        );
+    }
+    let mut bad_summary: Option<String> = None;
+    for (_, _, args) in &log_calls {
+        let summary = args.get("summary").and_then(Value::as_str).unwrap_or("");
+        if summary.is_empty() {
+            bad_summary = Some("summary missing or empty".to_string());
+            break;
+        }
+        let len = summary.chars().count();
+        if !(5..=300).contains(&len) {
+            bad_summary = Some(format!("summary length {len} outside 5..=300"));
+            break;
+        }
+        if !summary.contains(' ') {
+            bad_summary = Some("summary is single-word — not a coherent sentence".to_string());
+            break;
+        }
+    }
+    if let Some(reason) = bad_summary {
+        return AssertionOutcome::fail(format!(
+            "log_progress called but summary fails the well-formed check ({reason})"
+        ));
+    }
+    AssertionOutcome::pass(format!(
+        "{} log_progress call(s); summaries pass well-formed heuristics",
+        log_calls.len()
+    ))
+}
+
+/// b1-probe-trivial — agent should NOT call `log_progress` on a content-
+/// free pleasantry. Also pins the `<daily_log>` negative cross-cutting.
+pub fn pm_does_not_log_on_trivial(turn: &TurnResult) -> AssertionOutcome {
+    if turn.final_text.contains("<daily_log>") {
+        return AssertionOutcome::fail(
+            "final_text contains the dead P5 `<daily_log>` tag — must be 0",
+        );
+    }
+    let calls = scan_mcp_tool_calls(&turn.notifications);
+    let log_calls: Vec<&(String, String, Value)> =
+        calls.iter().filter(|(_, tool, _)| tool == "log_progress").collect();
+    if !log_calls.is_empty() {
+        return AssertionOutcome::fail(format!(
+            "agent called log_progress {} time(s) on a trivial exchange — should keep \
+             trivial turns ephemeral",
+            log_calls.len()
+        ));
+    }
+    AssertionOutcome::pass("no log_progress call on trivial exchange")
 }
 
 /// Return every `<send_message ...>...</send_message>` inner body in
