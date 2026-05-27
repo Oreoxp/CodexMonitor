@@ -62,14 +62,62 @@ mod fixture;
 mod runner;
 mod ws_rpc;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use crate::fixture::FIXTURES;
 use crate::runner::RunContext;
 
+/// CLI flags. Parsed inline; no clap dependency — keep the bin's
+/// compile-time surface minimal.
+struct CliArgs {
+    /// Run only fixtures whose id contains this substring. Default: run
+    /// all FIXTURES.
+    filter: Option<String>,
+    /// Number of times to run each selected fixture (N=20 for the P6
+    /// Step 6 behavioural eval; default 1).
+    runs: usize,
+}
+
+fn parse_args() -> Result<CliArgs, String> {
+    let mut args = std::env::args().skip(1);
+    let mut filter: Option<String> = None;
+    let mut runs: usize = 1;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--filter" | "-f" => {
+                filter = Some(args.next().ok_or("--filter needs a value")?);
+            }
+            "--runs" | "-n" => {
+                let v = args.next().ok_or("--runs needs a value")?;
+                runs = v.parse::<usize>().map_err(|e| format!("--runs not a positive int: {e}"))?;
+                if runs == 0 {
+                    return Err("--runs must be ≥ 1".to_string());
+                }
+            }
+            "--help" | "-h" => {
+                eprintln!("opencrab-eval [--filter <substring>] [--runs <N>]");
+                eprintln!("  --filter <sub>   only run fixtures whose id contains <sub>");
+                eprintln!("  --runs <N>       run each selected fixture N times (default 1)");
+                std::process::exit(0);
+            }
+            other => return Err(format!("unexpected argument: {other}")),
+        }
+    }
+    Ok(CliArgs { filter, runs })
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
+    let cli = match parse_args() {
+        Ok(c) => c,
+        Err(err) => {
+            eprintln!("[opencrab-eval] {err}");
+            return ExitCode::from(2);
+        }
+    };
+
     let bearer = std::env::var("OPENCRAB_EVAL_BEARER").ok().filter(|v| !v.trim().is_empty());
     let codex_bin = std::env::var("OPENCRAB_EVAL_CODEX_APP_SERVER")
         .ok()
@@ -108,7 +156,29 @@ async fn main() -> ExitCode {
         team_mcp: team_mcp.clone(),
     };
 
-    println!("opencrab-eval — running {} fixture(s)\n", FIXTURES.len());
+    // Filter + plan the run set.
+    let selected: Vec<&fixture::Fixture> = FIXTURES
+        .iter()
+        .filter(|f| match &cli.filter {
+            Some(sub) => f.id.contains(sub.as_str()),
+            None => true,
+        })
+        .collect();
+    if selected.is_empty() {
+        eprintln!(
+            "[opencrab-eval] no fixture matched --filter {:?} — known ids: {:?}",
+            cli.filter,
+            FIXTURES.iter().map(|f| f.id).collect::<Vec<_>>()
+        );
+        return ExitCode::from(2);
+    }
+
+    println!(
+        "opencrab-eval — running {} fixture(s) × {} run(s) each = {} total",
+        selected.len(),
+        cli.runs,
+        selected.len() * cli.runs,
+    );
     println!("sidecar root:     {}", ctx.sidecar_root.display());
     println!("codex-app-server: {}", ctx.codex_app_server.display());
     match &ctx.team_mcp {
@@ -118,61 +188,115 @@ async fn main() -> ExitCode {
             println!("  (set $OPENCRAB_EVAL_TEAM_MCP or build opencrab-team-mcp into the same dir)");
         }
     }
+    if let Some(sub) = &cli.filter {
+        println!("filter:           {sub:?}");
+    }
     println!();
+
+    // Per-fixture tallies for the N×F summary.
+    let mut per_fixture_pass: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut per_fixture_fail: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut per_fixture_err: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut per_fixture_daily_log: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut per_fixture_fail_notes: BTreeMap<&str, Vec<String>> = BTreeMap::new();
 
     let mut passed = 0usize;
     let mut failed = 0usize;
     let mut errored = 0usize;
 
-    for fixture in FIXTURES {
-        println!("{}", "─".repeat(78));
-        println!("FIXTURE  {}", fixture.id);
-        println!("         {}", fixture.description);
-        println!("USER →   {}", abbreviate_for_log(fixture.user_turn));
-        println!();
+    for fixture in &selected {
+        for run_index in 1..=cli.runs {
+            println!("{}", "─".repeat(78));
+            println!(
+                "FIXTURE  {}  (run {} of {})",
+                fixture.id, run_index, cli.runs
+            );
+            println!("         {}", fixture.description);
+            println!("USER →   {}", abbreviate_for_log(fixture.user_turn));
+            println!();
 
-        match runner::run_fixture(&ctx, fixture).await {
-            Ok(turn) => {
-                println!("AGENT FINAL TEXT");
-                println!("----");
-                println!("{}", turn.final_text);
-                println!("----");
-                println!();
-                // Step 26: dump every completed MCP tool call so external
-                // analysis can (a) classify text-tag-mode failures and
-                // (b) check tool-mode send_message bodies for `[From X]`
-                // contamination. One line per call, grep-friendly.
-                let calls = assertions::scan_mcp_tool_calls(&turn.notifications);
-                println!("MCP TOOL CALLS ({})", calls.len());
-                for (server, tool, args) in &calls {
-                    println!("TOOL_CALL  server={server}  tool={tool}  args={args}");
+            match runner::run_fixture(&ctx, fixture).await {
+                Ok((turn, run)) => {
+                    println!("AGENT FINAL TEXT");
+                    println!("----");
+                    println!("{}", turn.final_text);
+                    println!("----");
+                    println!();
+                    let calls = assertions::scan_mcp_tool_calls(&turn.notifications);
+                    println!("MCP TOOL CALLS ({})", calls.len());
+                    for (server, tool, args) in &calls {
+                        println!("TOOL_CALL  server={server}  tool={tool}  args={args}");
+                    }
+                    if turn.final_text.contains("<daily_log>") {
+                        *per_fixture_daily_log.entry(fixture.id).or_insert(0) += 1;
+                    }
+                    println!();
+                    let artifacts = run.artifacts(fixture.user_correspondent_id);
+                    let outcome = (fixture.assert)(&turn, &artifacts);
+                    if outcome.passed {
+                        println!("VERDICT  ✓ PASS — {}", outcome.notes);
+                        passed += 1;
+                        *per_fixture_pass.entry(fixture.id).or_insert(0) += 1;
+                    } else {
+                        println!("VERDICT  ✗ FAIL — {}", outcome.notes);
+                        failed += 1;
+                        *per_fixture_fail.entry(fixture.id).or_insert(0) += 1;
+                        per_fixture_fail_notes
+                            .entry(fixture.id)
+                            .or_default()
+                            .push(format!("run {run_index}: {}", outcome.notes));
+                    }
+                    // `run` (FixtureRun) drops here — tempdir gets removed
+                    // unless OPENCRAB_EVAL_KEEP_TEMPDIR is set.
+                    drop(run);
                 }
-                println!();
-                let outcome = (fixture.assert)(&turn);
-                if outcome.passed {
-                    println!("VERDICT  ✓ PASS — {}", outcome.notes);
-                    passed += 1;
-                } else {
-                    println!("VERDICT  ✗ FAIL — {}", outcome.notes);
-                    failed += 1;
+                Err(err) => {
+                    println!("VERDICT  ⚠ ERROR — harness failed before assertion: {err}");
+                    errored += 1;
+                    *per_fixture_err.entry(fixture.id).or_insert(0) += 1;
+                    per_fixture_fail_notes
+                        .entry(fixture.id)
+                        .or_default()
+                        .push(format!("run {run_index} ERROR: {err}"));
                 }
             }
-            Err(err) => {
-                println!("VERDICT  ⚠ ERROR — harness failed before assertion: {err}");
-                errored += 1;
-            }
+            println!();
         }
-        println!();
     }
 
+    let total = selected.len() * cli.runs;
     println!("{}", "═".repeat(78));
     println!(
-        "SUMMARY  passed={passed}  failed={failed}  error={errored}  total={}",
-        FIXTURES.len()
+        "AGGREGATE  passed={passed}  failed={failed}  error={errored}  total={total}"
     );
+    println!();
+    println!("PER-FIXTURE TALLY  (id  pass/total  fails/errors  <daily_log> count)");
+    for fixture in &selected {
+        let p = per_fixture_pass.get(fixture.id).copied().unwrap_or(0);
+        let f = per_fixture_fail.get(fixture.id).copied().unwrap_or(0);
+        let e = per_fixture_err.get(fixture.id).copied().unwrap_or(0);
+        let dl = per_fixture_daily_log.get(fixture.id).copied().unwrap_or(0);
+        println!(
+            "  {:24}  {}/{}  fail={} err={}  daily_log={}",
+            fixture.id, p, cli.runs, f, e, dl,
+        );
+    }
+    if per_fixture_fail_notes.values().any(|v| !v.is_empty()) {
+        println!();
+        println!("FAILURE / ERROR NOTES (per fixture)");
+        for fixture in &selected {
+            if let Some(notes) = per_fixture_fail_notes.get(fixture.id) {
+                if notes.is_empty() {
+                    continue;
+                }
+                println!("  {}:", fixture.id);
+                for n in notes {
+                    println!("    - {n}");
+                }
+            }
+        }
+    }
 
-    // Non-zero exit if anything failed or errored — useful for CI gating
-    // when the user opts in. Pure pass = exit 0.
     if failed + errored == 0 {
         ExitCode::SUCCESS
     } else {

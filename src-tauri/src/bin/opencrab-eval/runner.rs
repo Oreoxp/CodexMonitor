@@ -25,7 +25,7 @@ use serde_json::{json, Value};
 use tokio::process::{Child, Command};
 use tokio::time::{sleep, timeout, Instant};
 
-use crate::assertions::TurnResult;
+use crate::assertions::{RunArtifacts, TurnResult};
 use crate::bootstrap;
 use crate::compose::{self, ComposeOutput};
 use crate::fixture::Fixture;
@@ -49,12 +49,27 @@ pub struct RunContext {
 
 pub struct FixtureRun {
     pub tempdir: PathBuf,
+    pub home_dir: PathBuf,
+    pub user_data_dir: PathBuf,
     pub workspace_dir: PathBuf,
     /// Kept alive for the duration of the run; killed on drop.
     pub child: Child,
     pub ws_url: String,
     pub developer_instructions: String,
     pub kickoff_prompt: String,
+}
+
+impl FixtureRun {
+    /// Derive the assertion-side artifacts. Cheap, just borrows + clones a
+    /// couple of paths.
+    pub fn artifacts(&self, agent_id: &str) -> RunArtifacts {
+        RunArtifacts {
+            tempdir: self.tempdir.clone(),
+            home_dir: self.home_dir.clone(),
+            user_data_dir: self.user_data_dir.clone(),
+            agent_id: agent_id.to_string(),
+        }
+    }
 }
 
 impl Drop for FixtureRun {
@@ -77,7 +92,14 @@ impl Drop for FixtureRun {
     }
 }
 
-pub async fn run_fixture(ctx: &RunContext, fixture: &Fixture) -> Result<TurnResult, String> {
+/// Run a fixture end-to-end. Returns BOTH the captured turn AND the
+/// FixtureRun (so the caller can build assertion-side `RunArtifacts` and
+/// the tempdir stays alive long enough for the assertion to open
+/// memory.db).
+pub async fn run_fixture(
+    ctx: &RunContext,
+    fixture: &Fixture,
+) -> Result<(TurnResult, FixtureRun), String> {
     let mut run = setup_fixture_environment(ctx, fixture).await?;
 
     let mut rpc = RpcClient::connect(&run.ws_url, CLIENT_VERSION).await?;
@@ -108,14 +130,13 @@ pub async fn run_fixture(ctx: &RunContext, fixture: &Fixture) -> Result<TurnResu
                 "args": [],
             }),
         );
-        // Step 19 diagnostic — ALSO register the production memory MCP
-        // server. If the model calls memory_search/memory_get but not
-        // send_message/propose_plan, we know qwen+codex+MCP works
-        // generally and the spike's failure is something specific to
-        // opencrab-team. If neither set surfaces, the diagnosis is
-        // "qwen3.5-plus has no model metadata → MCP path degraded".
-        // The server resolves its own `~/.opencrab/agents/_eval/memory.db`
-        // from `--agent-id` (P6 Step 1) — no path passes through here.
+        // ALSO register the production memory MCP server. P6 Step 6
+        // re-cut: pass the fixture's actual `user_correspondent_id` as
+        // `--agent-id` (was hardcoded `_eval` during the Step 19
+        // diagnostic — that pointed the mcp server at a separate
+        // memory.db from the one bootstrap seeds, which broke F-mem-write
+        // post-run assertions and F-mem-recall seed-based recall).
+        // Mirror prod: the agent's id IS the memory.db owner.
         let memory_mcp_path = team_mcp_path
             .parent()
             .map(|p| p.join("opencrab-memory-mcp"))
@@ -125,7 +146,7 @@ pub async fn run_fixture(ctx: &RunContext, fixture: &Fixture) -> Result<TurnResu
                 "mcp_servers.opencrab-memory".to_string(),
                 json!({
                     "command": memory_path.to_string_lossy(),
-                    "args": ["--agent-id", "_eval"],
+                    "args": ["--agent-id", fixture.user_correspondent_id],
                 }),
             );
         }
@@ -244,14 +265,17 @@ pub async fn run_fixture(ctx: &RunContext, fixture: &Fixture) -> Result<TurnResu
 
     // Stop the child explicitly here (rather than letting Drop do it
     // best-effort) so the next fixture's spawn doesn't race with this
-    // one's port hold.
+    // one's port hold. The tempdir survives — the caller (main.rs) needs
+    // it to open memory.db for the F-mem-write / F-mem-recall disk-side
+    // assertion. FixtureRun's Drop reaps the tempdir at end of scope.
     let _ = run.child.start_kill();
     let _ = timeout(Duration::from_secs(5), run.child.wait()).await;
 
-    Ok(TurnResult {
+    let turn = TurnResult {
         final_text,
         notifications: turn_notifs,
-    })
+    };
+    Ok((turn, run))
 }
 
 // ---------------------------------------------------------------------------
@@ -301,6 +325,19 @@ async fn setup_fixture_environment(
     bootstrap::ensure_project_layer_at(&project_data_dir, &team.id, &team.agents)
         .map_err(|err| format!("ensure_project_layer_at: {err}"))?;
 
+    // 3b. Optional: seed the agent's memory.db BEFORE codex-app-server
+    // boots. The mcp server creates the same schema idempotently on first
+    // call, so writing to the file here (and re-opening via FTS5 triggers
+    // intact) is safe. F-mem-recall uses this to plant 12 rows so the key
+    // historical entry sits OUTSIDE the LIMIT-10 prelude window.
+    if let Some(seeder) = fixture.seed_memory_db {
+        let memory_db = user_data_dir
+            .join("agents")
+            .join(fixture.user_correspondent_id)
+            .join("memory.db");
+        seeder(&memory_db);
+    }
+
     // 4. compose.mts — get the on-wire developer_instructions + kickoff.
     //    Step 18: tools_mode = ctx.team_mcp.is_some() — when we register
     //    the stub MCP server, also swap the comm guide to tool-mode prose.
@@ -324,6 +361,8 @@ async fn setup_fixture_environment(
 
     Ok(FixtureRun {
         tempdir,
+        home_dir,
+        user_data_dir,
         workspace_dir,
         child,
         ws_url,

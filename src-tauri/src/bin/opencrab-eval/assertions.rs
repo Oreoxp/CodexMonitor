@@ -12,6 +12,8 @@
 // grammar in ~30 lines keeps the bin self-contained and avoids dragging
 // in the whole `sidecar_session` tree via `#[path]`.
 
+use std::path::{Path, PathBuf};
+
 use serde_json::Value;
 
 /// Tool-call notification methods we treat as code-modifying. Empty for
@@ -31,6 +33,69 @@ pub struct TurnResult {
     /// Every notification observed between sending the user turn and
     /// `turn/completed`. Used by assertions to look at tool-call shape.
     pub notifications: Vec<(String, Value)>,
+}
+
+/// P6 Step 6 — assertion-side handle to per-fixture filesystem state.
+///
+/// Existing assertions (F01-F03 + F-mem-trivial-control) ignore this; the
+/// post-run memory.db assertions for `F-mem-write` and `F-mem-recall` use
+/// `memory_db_path()` to independently open the agent's SQLite log store
+/// and verify rows landed (not just that the tool ack came back).
+///
+/// Paths are derived from `FixtureRun.tempdir` + `Fixture.user_correspondent_id`
+/// in the runner; the assertion never sees the tempdir's `Drop` guard, so it
+/// is safe to open the file before the runner cleans up.
+#[derive(Debug, Clone)]
+pub struct RunArtifacts {
+    pub tempdir: PathBuf,
+    pub home_dir: PathBuf,
+    pub user_data_dir: PathBuf,
+    pub agent_id: String,
+}
+
+impl RunArtifacts {
+    pub fn memory_db_path(&self) -> PathBuf {
+        self.user_data_dir
+            .join("agents")
+            .join(&self.agent_id)
+            .join("memory.db")
+    }
+}
+
+/// Open the agent's memory.db read-only and return all `(summary, detail)`
+/// rows ordered by id ascending. None if the file does not exist (a
+/// pre-condition violation the caller turns into a fail). Errors propagate
+/// as a string for the assertion to render.
+pub fn read_memory_db_rows(
+    memory_db: &Path,
+) -> Result<Vec<(i64, String, Option<String>)>, String> {
+    if !memory_db.exists() {
+        return Err(format!(
+            "memory.db does not exist at {} — log_progress never landed",
+            memory_db.display()
+        ));
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        memory_db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|e| format!("open memory.db read-only: {e}"))?;
+    let mut stmt = conn
+        .prepare("SELECT id, summary, detail FROM log ORDER BY id ASC")
+        .map_err(|e| format!("prepare select: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            let id: i64 = row.get(0)?;
+            let summary: String = row.get(1)?;
+            let detail: Option<String> = row.get(2)?;
+            Ok((id, summary, detail))
+        })
+        .map_err(|e| format!("query: {e}"))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| format!("row: {e}"))?);
+    }
+    Ok(out)
 }
 
 #[derive(Debug)]
@@ -58,7 +123,10 @@ impl AssertionOutcome {
 // Fixture 01 — PM clear request: well-formed <propose_plan>
 // ---------------------------------------------------------------------------
 
-pub fn pm_emits_well_formed_plan(turn: &TurnResult) -> AssertionOutcome {
+pub fn pm_emits_well_formed_plan(
+    turn: &TurnResult,
+    _artifacts: &RunArtifacts,
+) -> AssertionOutcome {
     let blocks = scan_propose_plan_blocks(&turn.final_text);
     if blocks.is_empty() {
         return AssertionOutcome::fail(
@@ -85,7 +153,10 @@ pub fn pm_emits_well_formed_plan(turn: &TurnResult) -> AssertionOutcome {
 // Fixture 02 — PM ambiguous request: must clarify
 // ---------------------------------------------------------------------------
 
-pub fn pm_clarifies_before_decomposing(turn: &TurnResult) -> AssertionOutcome {
+pub fn pm_clarifies_before_decomposing(
+    turn: &TurnResult,
+    _artifacts: &RunArtifacts,
+) -> AssertionOutcome {
     let has_plan = !scan_propose_plan_blocks(&turn.final_text).is_empty();
     let has_question = turn.final_text.contains('?')
         || contains_any_ci(
@@ -126,7 +197,10 @@ pub fn pm_clarifies_before_decomposing(turn: &TurnResult) -> AssertionOutcome {
 // Fixture 03 — QA verification: report findings, don't modify code
 // ---------------------------------------------------------------------------
 
-pub fn qa_reports_without_modifying(turn: &TurnResult) -> AssertionOutcome {
+pub fn qa_reports_without_modifying(
+    turn: &TurnResult,
+    _artifacts: &RunArtifacts,
+) -> AssertionOutcome {
     // (a) No code-modifying tool call appeared in the turn.
     let mut modifying_tool_calls = Vec::new();
     for (method, params) in &turn.notifications {
@@ -279,7 +353,10 @@ pub fn scan_mcp_tool_calls(notifs: &[(String, Value)]) -> Vec<(String, String, V
 
 // -- Fixture 01 (clear request) — PM must call propose_plan ---------------
 
-pub fn pm_calls_propose_plan_tool(turn: &TurnResult) -> AssertionOutcome {
+pub fn pm_calls_propose_plan_tool(
+    turn: &TurnResult,
+    _artifacts: &RunArtifacts,
+) -> AssertionOutcome {
     let calls = scan_mcp_tool_calls(&turn.notifications);
     let plan_calls: Vec<&(String, String, Value)> =
         calls.iter().filter(|(_, tool, _)| tool == "propose_plan").collect();
@@ -308,7 +385,10 @@ pub fn pm_calls_propose_plan_tool(turn: &TurnResult) -> AssertionOutcome {
 
 // -- Fixture 02 (ambiguous) — PM must NOT propose ------------------------
 
-pub fn pm_does_not_propose_when_ambiguous_tool(turn: &TurnResult) -> AssertionOutcome {
+pub fn pm_does_not_propose_when_ambiguous_tool(
+    turn: &TurnResult,
+    _artifacts: &RunArtifacts,
+) -> AssertionOutcome {
     let calls = scan_mcp_tool_calls(&turn.notifications);
     let plan_calls: Vec<&(String, String, Value)> =
         calls.iter().filter(|(_, tool, _)| tool == "propose_plan").collect();
@@ -340,7 +420,10 @@ pub fn pm_does_not_propose_when_ambiguous_tool(turn: &TurnResult) -> AssertionOu
 
 // -- Fixture 03 (QA) — must call send_message, no modifying tools --------
 
-pub fn qa_calls_send_message_no_modifying_tool(turn: &TurnResult) -> AssertionOutcome {
+pub fn qa_calls_send_message_no_modifying_tool(
+    turn: &TurnResult,
+    _artifacts: &RunArtifacts,
+) -> AssertionOutcome {
     // (a) No code-modifying tool call (same hint list as the text-tag version).
     for (method, params) in &turn.notifications {
         if !TOOL_CALL_METHOD_PREFIXES
@@ -414,13 +497,26 @@ pub fn qa_calls_send_message_no_modifying_tool(turn: &TurnResult) -> AssertionOu
 }
 
 // ---------------------------------------------------------------------------
-// P6 Step 5 — b1 probe assertions for memory tool calls
+// P6 Step 6 — F-mem-* formal fixture assertions (promoted from b1-probe-*)
 // ---------------------------------------------------------------------------
+//
+// Step 5 b1-probe assertions were the visibility / behaviour preview.
+// Step 6 promotes them: same call-level pins PLUS an independent disk-side
+// pin via `RunArtifacts::memory_db_path`. Direct guard against the P5
+// pattern "tool ack came back ok but no row landed" — we open memory.db
+// ourselves via rusqlite OPEN_READ_ONLY and verify the row(s) match the
+// mcpToolCall args we saw on the wire.
 
-/// b1-probe-write — agent should call `log_progress` at least once after a
-/// substantive decision + explicit "remember for tomorrow" cue. Also pins
-/// that the dead P5 `<daily_log>` tag never appears in `final_text`.
-pub fn pm_logs_progress_after_decision(turn: &TurnResult) -> AssertionOutcome {
+/// F-mem-write (promoted from b1-probe-write) — after a substantive
+/// decision + "remember for tomorrow" cue, the agent must:
+///   1. call `log_progress` ≥ 1× with a well-formed summary,
+///   2. produce zero `<daily_log>` text-tag occurrences (P5 corpse check),
+///   3. land that summary on disk in `<home>/.opencrab/agents/<id>/memory.db`
+///      — read independently via rusqlite, not trusted from the tool ack.
+pub fn pm_logs_progress_after_decision(
+    turn: &TurnResult,
+    artifacts: &RunArtifacts,
+) -> AssertionOutcome {
     if turn.final_text.contains("<daily_log>") {
         return AssertionOutcome::fail(
             "final_text contains the dead P5 `<daily_log>` tag — must be 0 (replaced by \
@@ -436,6 +532,7 @@ pub fn pm_logs_progress_after_decision(turn: &TurnResult) -> AssertionOutcome {
         );
     }
     let mut bad_summary: Option<String> = None;
+    let mut observed_summaries: Vec<String> = Vec::new();
     for (_, _, args) in &log_calls {
         let summary = args.get("summary").and_then(Value::as_str).unwrap_or("");
         if summary.is_empty() {
@@ -451,21 +548,66 @@ pub fn pm_logs_progress_after_decision(turn: &TurnResult) -> AssertionOutcome {
             bad_summary = Some("summary is single-word — not a coherent sentence".to_string());
             break;
         }
+        observed_summaries.push(summary.to_string());
     }
     if let Some(reason) = bad_summary {
         return AssertionOutcome::fail(format!(
             "log_progress called but summary fails the well-formed check ({reason})"
         ));
     }
+
+    // Independent post-run disk read — the load-bearing P6 Step 6
+    // strengthening. Even if the tool acked, the file must contain a row
+    // whose `summary` exactly matches one of the observed `args.summary`
+    // values. Anything weaker (e.g. "≥1 row") could regress silently to
+    // the P5 "ack ok, file empty" bug; we want byte-equality on at least
+    // one observed/written pair.
+    let memory_db = artifacts.memory_db_path();
+    let rows = match read_memory_db_rows(&memory_db) {
+        Ok(rows) => rows,
+        Err(err) => {
+            return AssertionOutcome::fail(format!(
+                "post-run memory.db read failed ({err}) — tool ack came back but row never \
+                 landed (the P5 regression class)"
+            ));
+        }
+    };
+    if rows.is_empty() {
+        return AssertionOutcome::fail(format!(
+            "memory.db at {} exists but has 0 rows — log_progress acked without writing",
+            memory_db.display()
+        ));
+    }
+    let row_summaries: Vec<&str> = rows.iter().map(|(_, s, _)| s.as_str()).collect();
+    let matched: Vec<&String> = observed_summaries
+        .iter()
+        .filter(|s| row_summaries.iter().any(|row| row == &s.as_str()))
+        .collect();
+    if matched.is_empty() {
+        return AssertionOutcome::fail(format!(
+            "memory.db has {} row(s) but none of their summary values match the {} \
+             mcpToolCall.args.summary observed on the wire (rows={row_summaries:?}, \
+             observed={observed_summaries:?})",
+            rows.len(),
+            observed_summaries.len(),
+        ));
+    }
+
     AssertionOutcome::pass(format!(
-        "{} log_progress call(s); summaries pass well-formed heuristics",
-        log_calls.len()
+        "{} log_progress call(s); {} row(s) on disk; {} summary equality match(es)",
+        log_calls.len(),
+        rows.len(),
+        matched.len(),
     ))
 }
 
-/// b1-probe-trivial — agent should NOT call `log_progress` on a content-
-/// free pleasantry. Also pins the `<daily_log>` negative cross-cutting.
-pub fn pm_does_not_log_on_trivial(turn: &TurnResult) -> AssertionOutcome {
+/// F-mem-trivial-control (promoted from b1-probe-trivial) — content-free
+/// pleasantry must NOT trigger `log_progress` and must NOT contain the
+/// dead P5 `<daily_log>` tag.
+pub fn pm_does_not_log_on_trivial(
+    turn: &TurnResult,
+    _artifacts: &RunArtifacts,
+) -> AssertionOutcome {
     if turn.final_text.contains("<daily_log>") {
         return AssertionOutcome::fail(
             "final_text contains the dead P5 `<daily_log>` tag — must be 0",
@@ -482,6 +624,81 @@ pub fn pm_does_not_log_on_trivial(turn: &TurnResult) -> AssertionOutcome {
         ));
     }
     AssertionOutcome::pass("no log_progress call on trivial exchange")
+}
+
+// ---------------------------------------------------------------------------
+// F-mem-recall — agent must consult its log, recall a specific seeded
+// fact (older than the prelude window), and use it in the final reply.
+// ---------------------------------------------------------------------------
+
+/// The verifiable facts seeded into the OLDEST row of memory.db by
+/// [`crate::fixture::seed_f_mem_recall`]. The assertion checks that the
+/// agent's final_text mentions BOTH the database engine name (`Postgres`
+/// / `PostgreSQL`) and at least one distinctive seeded detail — proof
+/// that recall traversed past the LIMIT-10 prelude window into the older
+/// history via `memory_search` / `memory_get`.
+pub const F_MEM_RECALL_ENGINE_KEYWORDS: &[&str] = &["postgres", "postgresql"];
+pub const F_MEM_RECALL_DISTINCTIVE_FACTS: &[&str] = &[
+    "notes-pg-primary.internal.example.com",
+    "notes-pg-primary",
+    "5432",
+    "10k users",
+    "10k",
+    "2026-04-12",
+    "operational cost",
+    "near-zero",
+];
+
+pub fn pm_recalls_seeded_fact(
+    turn: &TurnResult,
+    _artifacts: &RunArtifacts,
+) -> AssertionOutcome {
+    if turn.final_text.contains("<daily_log>") {
+        return AssertionOutcome::fail(
+            "final_text contains the dead P5 `<daily_log>` tag — must be 0",
+        );
+    }
+    let calls = scan_mcp_tool_calls(&turn.notifications);
+    let recall_calls: Vec<&(String, String, Value)> = calls
+        .iter()
+        .filter(|(_, tool, _)| tool == "memory_search" || tool == "memory_get")
+        .collect();
+    if recall_calls.is_empty() {
+        return AssertionOutcome::fail(
+            "no memory_search / memory_get tool call — agent answered from prior context or \
+             guessed instead of consulting its log",
+        );
+    }
+    let lower = turn.final_text.to_ascii_lowercase();
+    let engine_hit = F_MEM_RECALL_ENGINE_KEYWORDS.iter().any(|k| lower.contains(k));
+    let fact_hits: Vec<&&str> = F_MEM_RECALL_DISTINCTIVE_FACTS
+        .iter()
+        .filter(|f| lower.contains(&f.to_ascii_lowercase()))
+        .collect();
+    if !engine_hit {
+        return AssertionOutcome::fail(format!(
+            "{} recall call(s), but final_text mentions neither `Postgres` nor `PostgreSQL` — \
+             search may have hit but the answer didn't surface the recalled engine choice",
+            recall_calls.len()
+        ));
+    }
+    if fact_hits.is_empty() {
+        return AssertionOutcome::fail(format!(
+            "{} recall call(s), final_text names Postgres, but contains NONE of the seeded \
+             distinctive facts {:?} — looks like a guess shaped by the question, not a recall",
+            recall_calls.len(),
+            F_MEM_RECALL_DISTINCTIVE_FACTS,
+        ));
+    }
+    AssertionOutcome::pass(format!(
+        "{} recall call(s) ({} memory_search / {} memory_get); final_text names Postgres + \
+         {} distinctive seeded fact(s): {:?}",
+        recall_calls.len(),
+        recall_calls.iter().filter(|(_, t, _)| t == "memory_search").count(),
+        recall_calls.iter().filter(|(_, t, _)| t == "memory_get").count(),
+        fact_hits.len(),
+        fact_hits,
+    ))
 }
 
 /// Return every `<send_message ...>...</send_message>` inner body in
@@ -547,19 +764,35 @@ mod tests {
         }
     }
 
+    fn stub_artifacts() -> RunArtifacts {
+        // Unit-test stub: the text-only assertions do not read disk. The
+        // memory-db assertion (F-mem-write) is covered by the end-to-end
+        // eval harness, not here — the harness writes a real memory.db.
+        RunArtifacts {
+            tempdir: PathBuf::from("/tmp/unit-test-stub"),
+            home_dir: PathBuf::from("/tmp/unit-test-stub/home"),
+            user_data_dir: PathBuf::from("/tmp/unit-test-stub/home/.opencrab"),
+            agent_id: "agent_pm".to_string(),
+        }
+    }
+
     #[test]
     fn plan_assert_passes_on_well_formed_block() {
-        let outcome = pm_emits_well_formed_plan(&turn(
-            r#"Here is the plan: <propose_plan><task title="step one">body</task></propose_plan>"#,
-        ));
+        let outcome = pm_emits_well_formed_plan(
+            &turn(
+                r#"Here is the plan: <propose_plan><task title="step one">body</task></propose_plan>"#,
+            ),
+            &stub_artifacts(),
+        );
         assert!(outcome.passed, "{}", outcome.notes);
     }
 
     #[test]
     fn plan_assert_fails_on_bare_markdown_bullets() {
-        let outcome = pm_emits_well_formed_plan(&turn(
-            "<propose_plan>\n- step one\n- step two\n</propose_plan>",
-        ));
+        let outcome = pm_emits_well_formed_plan(
+            &turn("<propose_plan>\n- step one\n- step two\n</propose_plan>"),
+            &stub_artifacts(),
+        );
         assert!(!outcome.passed, "{}", outcome.notes);
         assert!(
             outcome.notes.contains("no <task>"),
@@ -570,32 +803,39 @@ mod tests {
 
     #[test]
     fn plan_assert_fails_when_no_propose_plan_at_all() {
-        let outcome = pm_emits_well_formed_plan(&turn(
-            "Sure, I'll just do step one, then step two, then step three.",
-        ));
+        let outcome = pm_emits_well_formed_plan(
+            &turn("Sure, I'll just do step one, then step two, then step three."),
+            &stub_artifacts(),
+        );
         assert!(!outcome.passed);
     }
 
     #[test]
     fn clarify_assert_passes_when_pm_asks_a_question() {
-        let outcome =
-            pm_clarifies_before_decomposing(&turn("Could you say which part of the API you mean?"));
+        let outcome = pm_clarifies_before_decomposing(
+            &turn("Could you say which part of the API you mean?"),
+            &stub_artifacts(),
+        );
         assert!(outcome.passed, "{}", outcome.notes);
     }
 
     #[test]
     fn clarify_assert_passes_when_pm_proposes_with_questions() {
-        let outcome = pm_clarifies_before_decomposing(&turn(
-            r#"Could you confirm scope? <propose_plan><task title="t">b</task></propose_plan>"#,
-        ));
+        let outcome = pm_clarifies_before_decomposing(
+            &turn(
+                r#"Could you confirm scope? <propose_plan><task title="t">b</task></propose_plan>"#,
+            ),
+            &stub_artifacts(),
+        );
         assert!(outcome.passed);
     }
 
     #[test]
     fn clarify_assert_fails_when_pm_proposes_without_questions() {
-        let outcome = pm_clarifies_before_decomposing(&turn(
-            r#"<propose_plan><task title="step one">do everything</task></propose_plan>"#,
-        ));
+        let outcome = pm_clarifies_before_decomposing(
+            &turn(r#"<propose_plan><task title="step one">do everything</task></propose_plan>"#),
+            &stub_artifacts(),
+        );
         assert!(!outcome.passed, "{}", outcome.notes);
     }
 
@@ -610,30 +850,34 @@ mod tests {
                 json!({ "item": { "type": "command", "name": "apply_patch" } }),
             )],
         };
-        let outcome = qa_reports_without_modifying(&result);
+        let outcome = qa_reports_without_modifying(&result, &stub_artifacts());
         assert!(!outcome.passed, "{}", outcome.notes);
         assert!(outcome.notes.contains("apply_patch"));
     }
 
     #[test]
     fn qa_assert_passes_on_clean_send_message_report() {
-        let outcome = qa_reports_without_modifying(&turn(
-            r#"<send_message to="user" channel="chat">
+        let outcome = qa_reports_without_modifying(
+            &turn(
+                r#"<send_message to="user" channel="chat">
 I could not find apps/api/src/middleware/auth.ts in this workspace; my finding is
 that the file does not exist at the path given.
 </send_message>"#,
-        ));
+            ),
+            &stub_artifacts(),
+        );
         assert!(outcome.passed, "{}", outcome.notes);
     }
 
     #[test]
     fn qa_assert_fails_when_report_is_bare_prose_no_send_message() {
-        // Step-12 regression case: agent reports findings but doesn't wrap
-        // them in `<send_message>`. Tightened in step 14: this now FAILs.
-        let outcome = qa_reports_without_modifying(&turn(
-            "I could not find apps/api/src/middleware/auth.ts in this workspace; \
-             my finding is that the file does not exist.",
-        ));
+        let outcome = qa_reports_without_modifying(
+            &turn(
+                "I could not find apps/api/src/middleware/auth.ts in this workspace; \
+                 my finding is that the file does not exist.",
+            ),
+            &stub_artifacts(),
+        );
         assert!(!outcome.passed, "should fail without send_message wrapper");
         assert!(
             outcome.notes.contains("<send_message>"),
@@ -644,20 +888,22 @@ that the file does not exist at the path given.
 
     #[test]
     fn qa_assert_fails_when_using_from_x_as_outbound_form() {
-        // Exact step-12 regression: `[From Dave]` is the inbound wrapper
-        // shape; agent should NOT emit it as its own outbound message.
-        let outcome = qa_reports_without_modifying(&turn(
-            "[From Dave] Auth middleware verification blocked: \
-             apps/api/src/middleware/auth.ts does not exist in the workspace.",
-        ));
+        let outcome = qa_reports_without_modifying(
+            &turn(
+                "[From Dave] Auth middleware verification blocked: \
+                 apps/api/src/middleware/auth.ts does not exist in the workspace.",
+            ),
+            &stub_artifacts(),
+        );
         assert!(!outcome.passed, "should reject [From X] outbound form");
     }
 
     #[test]
     fn qa_assert_fails_when_send_message_present_but_no_findings_inside() {
-        let outcome = qa_reports_without_modifying(&turn(
-            r#"<send_message to="user" channel="chat">hi there</send_message>"#,
-        ));
+        let outcome = qa_reports_without_modifying(
+            &turn(r#"<send_message to="user" channel="chat">hi there</send_message>"#),
+            &stub_artifacts(),
+        );
         assert!(!outcome.passed, "should require finding-language in the block");
     }
 }
