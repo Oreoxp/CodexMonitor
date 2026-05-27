@@ -76,17 +76,33 @@ async fn handle_codex_start_thread(state: &AppState, params: &Value) -> Result<V
             .await?;
     let mut start_params = Map::new();
     start_params.insert("cwd".to_string(), json!(workspace_path));
-    // Phase 2 demo: team agents run with `approvalPolicy: "never"` so the
-    // kickoff turn (and any subsequent turn that inherits the thread default)
-    // never blocks waiting for human-in-the-loop approval. The kickoff prompt
-    // asks for plain-prose ack only, but Codex's base coding-agent prompt
-    // can nudge the model into a probe tool call on its first turn; with
-    // `on-request` that probe would suspend the turn and the user would see
-    // a stalled empty thread. Phase 2 is single-machine isolated demo
-    // territory — no real human-in-the-loop value to gate on. (Per-turn
-    // approvals from later normal-mode `send_user_message_to_thread` calls
-    // still flow through `send_user_message_core`'s access-mode mapping.)
+    // Team agents run unattended: `approvalPolicy: "never"` so kickoff and
+    // any subsequent turn never block waiting for human-in-the-loop
+    // approval (the kickoff prompt asks for plain-prose ack only, but
+    // Codex's base coding-agent prompt can still nudge a probe tool call;
+    // with `on-request` that probe would suspend the turn and the user
+    // would see a stalled empty thread).
+    //
+    // **`sandbox: "danger-full-access"` is load-bearing — DO NOT remove.**
+    // When `sandbox` is unset codex falls back to `SandboxMode::ReadOnly`
+    // (codex-rs `protocol/src/config_types.rs` — `#[default] ReadOnly`).
+    // The combo `approval_policy = Never` + `Managed(ReadOnly)` makes
+    // `mcp_permission_prompt_is_auto_approved` (codex-rs
+    // `codex-mcp/src/mcp/mod.rs`) return `false`: it only auto-approves
+    // when the permission profile has full-disk write access. The MCP
+    // tool call then enters the approval-prompt path, but `Never` means
+    // codex never actually surfaces a prompt — the call wedges
+    // permanently and the UI shows an empty spinning thread.
+    // P6 memory tools (`log_progress` / `memory_search` / `memory_get`)
+    // and any agent write tool go through this same path, so every tool
+    // call would hang. Eval's `runner.rs` always sets `danger-full-access`
+    // for the same reason; the real-app thread/start missed it until P6
+    // post-step-6, which is what the live UI smoke caught. (Per-turn
+    // approvals from later normal-mode `send_user_message_to_thread`
+    // calls still flow through `send_user_message_core`'s access-mode
+    // mapping, independent of this thread-default sandbox.)
     start_params.insert("approvalPolicy".to_string(), json!("never"));
+    start_params.insert("sandbox".to_string(), json!("danger-full-access"));
     if let Some(dev) = developer_instructions {
         start_params.insert("developerInstructions".to_string(), json!(dev));
     }
