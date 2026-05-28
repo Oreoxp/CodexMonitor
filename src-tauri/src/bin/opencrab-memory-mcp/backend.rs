@@ -99,12 +99,12 @@ pub fn open(memory_db: &Path) -> Result<Connection, BackendError> {
     if let Some(parent) = memory_db.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let conn = Connection::open(memory_db)?;
+    let mut conn = Connection::open(memory_db)?;
     // WAL persists in the file header once set, but re-asserting it on every
     // open keeps cross-process coexistence safe (see CLAUDE.md storage rule:
     // any future SQLite client on this file MUST also pragma WAL).
     let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
-    migrate(&conn)?;
+    migrate(&mut conn)?;
     Ok(conn)
 }
 
@@ -203,9 +203,18 @@ pub fn get(memory_db: &Path, id: i64) -> Result<MemoryEntry, BackendError> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Create the `log` table, the `log_fts` virtual table, and the three
-/// sync triggers if they do not already exist.
-fn migrate(conn: &Connection) -> Result<(), BackendError> {
+/// Schema version this binary writes. The DB file records its current
+/// schema in `PRAGMA user_version`; `migrate` advances it one step at a
+/// time up to this value.
+const SCHEMA_VERSION: i64 = 1;
+
+/// Bring `conn`'s schema up to [`SCHEMA_VERSION`].
+///
+/// v0 baseline (every `IF NOT EXISTS`) runs unconditionally so a fresh DB
+/// gets the initial objects; against an already-initialised DB it is a
+/// no-op. After that we read `PRAGMA user_version` and apply the v1
+/// step iff the file is still at v0.
+fn migrate(conn: &mut Connection) -> Result<(), BackendError> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS log (
             id      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -229,6 +238,28 @@ fn migrate(conn: &Connection) -> Result<(), BackendError> {
             INSERT INTO log_fts(rowid, detail) VALUES (new.id, new.detail);
         END;",
     )?;
+
+    let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if current < SCHEMA_VERSION {
+        // `ALTER TABLE ADD COLUMN` is not idempotent — a partial v1 run
+        // would crash the next open() on `duplicate column name: origin`.
+        // Wrap the whole step in one IMMEDIATE transaction with the
+        // `user_version` bump as the last statement, so any mid-batch
+        // failure rolls back cleanly and the next open() retries from v0.
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // Re-read under the write lock to guard the rare case of two
+        // first-opens racing on the upgrade.
+        let locked: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if locked < 1 {
+            tx.execute_batch(
+                "ALTER TABLE log ADD COLUMN origin TEXT NOT NULL DEFAULT 'self';
+                 ALTER TABLE log ADD COLUMN project_hash TEXT;
+                 CREATE INDEX IF NOT EXISTS idx_log_ts ON log(ts);
+                 PRAGMA user_version = 1;",
+            )?;
+        }
+        tx.commit()?;
+    }
     Ok(())
 }
 
@@ -467,5 +498,293 @@ mod tests {
         assert_eq!(clamp_limit(Some(0)), 1);
         assert_eq!(clamp_limit(Some(1)), 1);
         assert_eq!(clamp_limit(Some(9999)), MAX_SEARCH_LIMIT);
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 6 Step 1 — schema versioning + provenance columns
+    // -----------------------------------------------------------------
+
+    /// Frozen copy of the v0 DDL — the schema as shipped at Phase 6 Step 0.
+    /// Inlined here (not reused from `migrate`) so the upgrade-path tests
+    /// reflect a *real* old-shaped DB even if `migrate` changes later.
+    const V0_DDL_FROZEN: &str = "CREATE TABLE log (
+        id      INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts      INTEGER NOT NULL,
+        summary TEXT    NOT NULL,
+        detail  TEXT
+    );
+    CREATE VIRTUAL TABLE log_fts USING fts5(
+        detail,
+        content='log',
+        content_rowid='id'
+    );
+    CREATE TRIGGER log_ai AFTER INSERT ON log BEGIN
+        INSERT INTO log_fts(rowid, detail) VALUES (new.id, new.detail);
+    END;
+    CREATE TRIGGER log_ad AFTER DELETE ON log BEGIN
+        INSERT INTO log_fts(log_fts, rowid, detail) VALUES('delete', old.id, old.detail);
+    END;
+    CREATE TRIGGER log_au AFTER UPDATE ON log BEGIN
+        INSERT INTO log_fts(log_fts, rowid, detail) VALUES('delete', old.id, old.detail);
+        INSERT INTO log_fts(rowid, detail) VALUES (new.id, new.detail);
+    END;";
+
+    fn read_user_version(conn: &Connection) -> i64 {
+        conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    fn log_columns(conn: &Connection) -> std::collections::BTreeSet<String> {
+        let mut stmt = conn.prepare("PRAGMA table_info(log)").unwrap();
+        let names = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
+        names.map(|n| n.unwrap()).collect()
+    }
+
+    fn expected_v1_log_columns() -> std::collections::BTreeSet<String> {
+        ["id", "ts", "summary", "detail", "origin", "project_hash"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect()
+    }
+
+    fn schema_object_exists(conn: &Connection, ty: &str, name: &str) -> bool {
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = ?1 AND name = ?2",
+                params![ty, name],
+                |r| r.get(0),
+            )
+            .unwrap();
+        n == 1
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct V0Row {
+        id: i64,
+        ts: i64,
+        summary: String,
+        detail: Option<String>,
+    }
+
+    /// Lay down a v0-shape DB at `db_path` and seed three rows: monotonic
+    /// `ts`, distinct summaries, one `detail`-null + two distinct non-null
+    /// details. Returns the seeded rows so the upgrade-path tests can
+    /// byte-compare them.
+    fn build_v0_db(db_path: &std::path::Path) -> Vec<V0Row> {
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let conn = Connection::open(db_path).unwrap();
+        let _: String = conn
+            .query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))
+            .unwrap();
+        conn.execute_batch(V0_DDL_FROZEN).unwrap();
+        // Explicit: this DB is at v0. (Default user_version is 0, but
+        // setting it documents the intent so a future reader can grep.)
+        conn.execute_batch("PRAGMA user_version = 0;").unwrap();
+
+        let seeds: [(i64, &str, Option<&str>); 3] = [
+            (1001, "early note", None),
+            (
+                1002,
+                "mid note about apricot",
+                Some("Wrote thoughts about apricot harvests and bananas."),
+            ),
+            (
+                1003,
+                "late note about cherry",
+                Some("A separate cherry-themed planning chunk."),
+            ),
+        ];
+        let mut rows = Vec::new();
+        for (ts, summary, detail) in seeds {
+            conn.execute(
+                "INSERT INTO log(ts, summary, detail) VALUES (?1, ?2, ?3)",
+                params![ts, summary, detail],
+            )
+            .unwrap();
+            rows.push(V0Row {
+                id: conn.last_insert_rowid(),
+                ts,
+                summary: summary.to_string(),
+                detail: detail.map(|s| s.to_string()),
+            });
+        }
+        drop(conn);
+        rows
+    }
+
+    // S1.A.1 — fresh DB lands on full v1 schema.
+    #[test]
+    fn s1_a1_fresh_db_lands_on_v1_schema() {
+        let (_tmp, db) = db_path();
+        let conn = open(&db).unwrap();
+        assert_eq!(read_user_version(&conn), 1);
+        assert_eq!(log_columns(&conn), expected_v1_log_columns());
+        assert!(schema_object_exists(&conn, "table", "log_fts"));
+        assert!(schema_object_exists(&conn, "trigger", "log_ai"));
+        assert!(schema_object_exists(&conn, "trigger", "log_ad"));
+        assert!(schema_object_exists(&conn, "trigger", "log_au"));
+        assert!(schema_object_exists(&conn, "index", "idx_log_ts"));
+    }
+
+    // S1.A.2 — fresh DB log_progress defaults origin='self', project_hash NULL.
+    #[test]
+    fn s1_a2_fresh_db_log_progress_sets_default_provenance() {
+        let (_tmp, db) = db_path();
+        let id = log_progress(&db, "first entry", Some("body")).unwrap();
+        let conn = open(&db).unwrap();
+        let (ts, summary, detail, origin, project_hash): (
+            i64,
+            String,
+            Option<String>,
+            String,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT ts, summary, detail, origin, project_hash \
+                 FROM log WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert!(ts > 0);
+        assert_eq!(summary, "first entry");
+        assert_eq!(detail.as_deref(), Some("body"));
+        assert_eq!(origin, "self");
+        assert!(project_hash.is_none());
+    }
+
+    // S1.B.1 — open() three times is idempotent; user_version stays 1.
+    #[test]
+    fn s1_b1_open_thrice_is_idempotent_and_user_version_stays_one() {
+        let (_tmp, db) = db_path();
+        for _ in 0..3 {
+            let conn = open(&db).unwrap();
+            assert_eq!(read_user_version(&conn), 1);
+        }
+    }
+
+    // S1.B.2 — re-open a persisted v1 DB preserves rows and version.
+    #[test]
+    fn s1_b2_reopen_v1_db_preserves_rows_and_version() {
+        let (_tmp, db) = db_path();
+        let id_a = log_progress(&db, "kept summary", Some("kept body")).unwrap();
+        let id_b = log_progress(&db, "second kept", None).unwrap();
+        let conn = open(&db).unwrap();
+        assert_eq!(read_user_version(&conn), 1);
+        let a = get(&db, id_a).unwrap();
+        assert!(a.found);
+        assert_eq!(a.summary, "kept summary");
+        assert_eq!(a.detail.as_deref(), Some("kept body"));
+        let b = get(&db, id_b).unwrap();
+        assert!(b.found);
+        assert_eq!(b.summary, "second kept");
+        assert_eq!(b.detail, None);
+    }
+
+    // S1.C.1 — old v0 DB upgrades in place; columns, index, user_version,
+    // and every old row's id/ts/summary/detail are preserved byte-for-byte;
+    // origin defaults to 'self' and project_hash to NULL.
+    #[test]
+    fn s1_c1_upgrades_v0_db_to_v1_preserving_old_rows() {
+        let (_tmp, db) = db_path();
+        let seeded = build_v0_db(&db);
+
+        let conn = open(&db).unwrap();
+        assert_eq!(read_user_version(&conn), 1);
+        assert_eq!(log_columns(&conn), expected_v1_log_columns());
+        assert!(schema_object_exists(&conn, "index", "idx_log_ts"));
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, ts, summary, detail, origin, project_hash \
+                 FROM log ORDER BY id",
+            )
+            .unwrap();
+        let upgraded: Vec<(i64, i64, String, Option<String>, String, Option<String>)> = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        assert_eq!(upgraded.len(), seeded.len());
+        for (after, before) in upgraded.iter().zip(seeded.iter()) {
+            assert_eq!(after.0, before.id);
+            assert_eq!(after.1, before.ts);
+            assert_eq!(after.2, before.summary);
+            assert_eq!(after.3, before.detail);
+            assert_eq!(after.4, "self");
+            assert!(after.5.is_none());
+        }
+    }
+
+    // S1.C.2 — after the v0→v1 upgrade, FTS still finds an old row's
+    // detail. Guards against ADD COLUMN breaking external-content FTS5.
+    #[test]
+    fn s1_c2_fts_still_finds_old_rows_after_upgrade() {
+        let (_tmp, db) = db_path();
+        let seeded = build_v0_db(&db);
+        drop(open(&db).unwrap());
+
+        let hits = search(&db, "apricot", 6).unwrap();
+        assert_eq!(hits.len(), 1, "hits = {hits:?}");
+        let expected = &seeded[1];
+        assert_eq!(hits[0].id, expected.id);
+        assert_eq!(hits[0].ts, expected.ts);
+        assert_eq!(hits[0].summary, expected.summary);
+        assert!(
+            hits[0].snippet.contains("apricot"),
+            "snippet = {}",
+            hits[0].snippet
+        );
+    }
+
+    // S1.C.3 — after the upgrade, log_progress writes a new row with
+    // origin='self', project_hash NULL, and FTS surfaces both the old
+    // and new row for a shared keyword (proves the INSERT trigger still
+    // populates log_fts after ALTER TABLE ADD COLUMN).
+    #[test]
+    fn s1_c3_log_progress_after_upgrade_writes_provenance_and_fts() {
+        let (_tmp, db) = db_path();
+        let seeded = build_v0_db(&db);
+        let new_id = log_progress(
+            &db,
+            "post-upgrade apricot follow-up",
+            Some("Another apricot dive after the schema migration."),
+        )
+        .unwrap();
+
+        let conn = open(&db).unwrap();
+        let (origin, project_hash): (String, Option<String>) = conn
+            .query_row(
+                "SELECT origin, project_hash FROM log WHERE id = ?1",
+                params![new_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(origin, "self");
+        assert!(project_hash.is_none());
+
+        let hits = search(&db, "apricot", 6).unwrap();
+        let ids: Vec<i64> = hits.iter().map(|h| h.id).collect();
+        let old_apricot_id = seeded[1].id;
+        assert!(
+            ids.contains(&old_apricot_id),
+            "expected old apricot row {old_apricot_id} in hits {ids:?}"
+        );
+        assert!(
+            ids.contains(&new_id),
+            "expected new apricot row {new_id} in hits {ids:?}"
+        );
     }
 }
