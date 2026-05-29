@@ -1,0 +1,87 @@
+# V2 Corpus — coverage matrix (dimension -> cases that hit it).
+# Mirrors the layered taxonomy in the spec §4. Empty dimensions name the phase
+# that will fill them. Source of truth for tags = each case's `tags:` field;
+# this file is the aggregation. Phase 1 = 14 cases (C001..C014).
+
+phase: 1
+case_count: 14
+
+# ---- S2 (ingest / parse_line classification) ----
+s2:
+  single-thread:            [C001, C002, C003, C004, C005, C006, C007, C008, C009, C010, C011, C013, C014]
+  multi-segment-compaction: [C012]
+  all-dropped:              [C013]
+  mixed-keep-drop:          [C001, C002, C003, C005]
+  tool-call-output-pairs:   [C001, C003, C004, C005, C006, C007, C009, C012]
+  utf8-multibyte:           [C006]
+  long-thread:              []          # Phase 3 (needs a >100-line / >48k-char sample)
+
+# ---- S3 (distillation) — positive: should yield KP(s) ----
+s3_positive:
+  kind-decision: [C001, C002, C012, C014]   # C012 = post-boundary segment
+  kind-failure:  [C003, C004]
+  kind-pattern:  [C005]
+  kind-fact:     [C006, C007]
+
+# ---- S3 — reverse: should yield [] ----
+s3_reverse:
+  greeting-only:             [C008]
+  task-complete-no-learning: [C009]
+  chitchat:                  [C010]
+  aborted:                   [C011]
+  meta-only:                 []          # Phase 2
+
+# ---- S3 — boundary / language ----
+s3_boundary:
+  long-truncation:    []                  # Phase 3 (>48k-char segment)
+  pure-zh:            [C010, C011]
+  pure-en:            [C004, C008]
+  mixed-zh-en:        [C001, C002, C003, C005, C006, C007, C009, C012, C014]
+  with-prior-summary: [C012]
+  noisy-tool-output:  [C003, C007]
+
+# ---- S4 (retrieval) — most query composition is harness-driven across the
+# whole corpus; only cases carrying their own expected_search are listed. ----
+s4:
+  lexical-only-hit:          []           # Phase 2/3 (harness composes queries)
+  semantic-only-hit:         []           # Phase 2/3
+  both-hit-same-order:       []           # Phase 2/3
+  both-hit-different-order:  []           # Phase 2/3
+  cross-topic-false-neighbor: [C001]      # C001 carries a cross-topic negative query (vs C014)
+
+# ---- S5 (consolidation) ----
+s5:
+  duplicate:                  []          # Phase 2
+  complement:                 []          # Phase 2
+  contradiction:              [C001, C002]
+  supersede:                  []          # Phase 2/3 (needs created_at_offset / compaction order)
+  cross-topic-false-neighbor: []          # Phase 2
+
+# ---- end-to-end composite ----
+e2e:
+  composite-workflow: []                  # Phase 3 (10-20 cases stacked as one agent's workflow)
+
+# ---- reverse index: case -> declared tags ----
+cases:
+  C001: [single-thread, kind-decision, mixed-keep-drop, tool-call-output-pairs, mixed-zh-en, cross-topic-false-neighbor]
+  C002: [single-thread, kind-decision, mixed-keep-drop, mixed-zh-en]
+  C003: [single-thread, kind-failure, tool-call-output-pairs, noisy-tool-output, mixed-keep-drop, mixed-zh-en]
+  C004: [single-thread, kind-failure, tool-call-output-pairs, pure-en]
+  C005: [single-thread, kind-pattern, tool-call-output-pairs, mixed-keep-drop, mixed-zh-en]
+  C006: [single-thread, kind-fact, tool-call-output-pairs, utf8-multibyte, mixed-zh-en]
+  C007: [single-thread, kind-fact, tool-call-output-pairs, noisy-tool-output, mixed-zh-en]
+  C008: [single-thread, greeting-only, pure-en]
+  C009: [single-thread, task-complete-no-learning, tool-call-output-pairs, mixed-zh-en]
+  C010: [single-thread, chitchat, pure-zh]
+  C011: [single-thread, aborted, pure-zh]
+  C012: [multi-segment-compaction, with-prior-summary, kind-decision, tool-call-output-pairs, mixed-zh-en]
+  C013: [single-thread, all-dropped]
+  C014: [single-thread, kind-decision, mixed-zh-en]
+
+# ---- language distribution (Phase 1; full-corpus target is 60/25/15 zh/mixed/en) ----
+language_distribution:
+  zh_only:     [C010, C011, C013]
+  zh_majority: [C001, C002, C003, C005, C007, C009, C012, C014]
+  mixed:       [C006]
+  en_only:     [C004, C008]
+  note: "Phase 1 skews zh (core-coverage first); Phase 2 rebalances toward the 60/25/15 target."

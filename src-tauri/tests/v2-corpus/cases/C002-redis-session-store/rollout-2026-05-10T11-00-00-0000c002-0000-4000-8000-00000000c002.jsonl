@@ -1,0 +1,20 @@
+{"timestamp": "2026-05-10T11:00:00.001Z", "type": "session_meta", "payload": {"id": "00000000-0000-4000-8000-000000000000", "cwd": "/Users/USER/code/acmechat", "originator": "codex_cli", "cli_version": "0.0.0", "instructions": "<base instructions omitted for fixture>"}}
+{"timestamp": "2026-05-10T11:00:00.002Z", "type": "event_msg", "payload": {"type": "task_started", "model_context_window": 200000}}
+{"timestamp": "2026-05-10T11:00:00.003Z", "type": "response_item", "payload": {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "You are operating in a sandboxed workspace. Tools available: edit, write, exec_command. Respect the approval policy and never touch files outside the workspace root. <skills>memory_search, memory_get</skills>"}]}}
+{"timestamp": "2026-05-10T11:00:00.004Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "AcmeChat 的会话状态(session)到底存哪?要求是读写要快,而且过期的会话能自动清掉,别让我写定时清理任务。"}]}}
+{"timestamp": "2026-05-10T11:00:00.005Z", "type": "turn_context", "payload": {"model": "acme-model-1", "sandbox_policy": "workspace-write", "approval_policy": "on-request"}}
+{"timestamp": "2026-05-10T11:00:00.006Z", "type": "event_msg", "payload": {"type": "user_message", "message": "AcmeChat 的会话状态(session)到底存哪?要求是读写要快,而且过期的会话能自动清掉,别让我写定时清理任务。"}}
+{"timestamp": "2026-05-10T11:00:00.007Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "会话读写在热路径上,每个请求都要碰一次,优先级是低延迟。候选就两个:进程内存 map,或者 Redis。内存 map 多实例之间不共享、重启也丢。Redis 跨实例共享,而且能用 TTL 让会话到期自动过期,正好省掉清理任务。所以这里定 Redis。"}]}}
+{"timestamp": "2026-05-10T11:00:00.008Z", "type": "event_msg", "payload": {"type": "agent_message", "message": "会话读写在热路径上,每个请求都要碰一次,优先级是低延迟。候选就两个:进程内存 map,或者 Redis。内存 map 多实例之间不共享、重启也丢。Redis 跨实例共享,而且能用 TTL 让会话到期自动过期,正好省掉清理任务。所以这里定 Redis。"}}
+{"timestamp": "2026-05-10T11:00:00.009Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "具体方案:key 用 session:<id>,value 存序列化后的会话对象,统一设 30 分钟 TTL,续期就重设 TTL。"}]}}
+{"timestamp": "2026-05-10T11:00:00.010Z", "type": "event_msg", "payload": {"type": "agent_message", "message": "具体方案:key 用 session:<id>,value 存序列化后的会话对象,统一设 30 分钟 TTL,续期就重设 TTL。"}}
+{"timestamp": "2026-05-10T11:00:00.011Z", "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"total_tokens": 1234}}}}
+{"timestamp": "2026-05-10T11:00:00.012Z", "type": "event_msg", "payload": {"type": "task_complete", "last_agent_message": ""}}
+{"timestamp": "2026-05-10T11:00:00.013Z", "type": "event_msg", "payload": {"type": "task_started", "model_context_window": 200000}}
+{"timestamp": "2026-05-10T11:00:00.014Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "可以,就 Redis。"}]}}
+{"timestamp": "2026-05-10T11:00:00.015Z", "type": "turn_context", "payload": {"model": "acme-model-1", "sandbox_policy": "workspace-write", "approval_policy": "on-request"}}
+{"timestamp": "2026-05-10T11:00:00.016Z", "type": "event_msg", "payload": {"type": "user_message", "message": "可以,就 Redis。"}}
+{"timestamp": "2026-05-10T11:00:00.017Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "好,会话状态走 Redis,session:<id> + 30 分钟 TTL。"}]}}
+{"timestamp": "2026-05-10T11:00:00.018Z", "type": "event_msg", "payload": {"type": "agent_message", "message": "好,会话状态走 Redis,session:<id> + 30 分钟 TTL。"}}
+{"timestamp": "2026-05-10T11:00:00.019Z", "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"total_tokens": 1234}}}}
+{"timestamp": "2026-05-10T11:00:00.020Z", "type": "event_msg", "payload": {"type": "task_complete", "last_agent_message": ""}}

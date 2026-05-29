@@ -24,6 +24,10 @@ use std::process::ExitCode;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
+    // Register vec0 BEFORE any sqlite3_open in this process. Idempotent
+    // via OnceLock so the bin can be re-entered safely; harmless for
+    // any non-vec connections that follow.
+    backend::ensure_vec_extension();
     let args = match parse_args(std::env::args().skip(1)) {
         Ok(args) => args,
         Err(err) => {
@@ -39,7 +43,75 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match server::run_stdio(args.agent_id, memory_db).await {
+    // Phase 6 Step 2-ingest — spawn the rollout → raw_thread/raw_event
+    // ingest loop. It polls `<user_root>/agents/<id>/team_sessions/` every
+    // 15 s, runs one `backend::ingest_once` per tick on a blocking thread,
+    // and never panics out of the loop — see [`backend::run_ingest_loop`].
+    let scan_root = match resolve_scan_root(&args.agent_id) {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("[opencrab-memory-mcp] scan_root unresolved: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let ingest_handle = tokio::spawn(backend::run_ingest_loop(
+        memory_db.clone(),
+        scan_root,
+        args.agent_id.clone(),
+    ));
+
+    // Phase 6 Step 3-wire — spawn the distillation loop iff the operator
+    // configured a provider via `OPENCRAB_DISTILLER_{BASE_URL,MODEL,API_KEY}`.
+    // Lives on a dedicated OS thread with its own current_thread runtime:
+    //   * decouples the LLM POST's async work from the MCP server's
+    //     runtime so they don't compete on the same executor;
+    //   * keeps the SQLite paths inside `distill_once` off the server's
+    //     hot loop, regardless of how long an extract round-trip takes.
+    // The thread is detached — when `main` returns the process exits and
+    // tears the thread down. Any in-flight IMMEDIATE transaction rolls
+    // back via WAL recovery on the next open; no graceful-shutdown
+    // signal is required.
+    match backend::HttpExtractor::load() {
+        Some(extractor) => {
+            let embedder = backend::HttpEmbedder::load();
+            match &embedder {
+                Some(_) => eprintln!("[embed] enabled"),
+                None => eprintln!(
+                    "[embed] disabled — set OPENCRAB_EMBED_MODEL (env) or \
+                     add `embed_model` (+ optional `embed_dimensions`) to \
+                     `<user_root>/distiller.json` to enable"
+                ),
+            }
+            let db = memory_db.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("build distill runtime");
+                rt.block_on(backend::run_distill_loop(db, extractor, embedder));
+            });
+            eprintln!("[distill] enabled");
+        }
+        None => eprintln!(
+            "[distill] disabled — set OPENCRAB_DISTILLER_BASE_URL/MODEL/API_KEY \
+             or write `<user_root>/distiller.json` with {{base_url, model, api_key}}"
+        ),
+    }
+
+    // A separate embedder instance for the server's `memory_search`
+    // hybrid path. Each is independent — loading from env/file is
+    // cheap, and decoupling means the server's embedder can be live
+    // even if the distill loop's was disabled (or vice versa). When
+    // either is `None`, that side degrades silently.
+    let server_embedder = backend::HttpEmbedder::load();
+    let result = server::run_stdio(args.agent_id, memory_db, server_embedder).await;
+    // Server exited (stdin closed) — stop the ingester. `abort` is enough
+    // because the loop holds no buffered writes between passes: any
+    // mid-pass IMMEDIATE transaction is owned inside the spawn_blocking
+    // call, which finishes (commit or rollback) before we'd ever see a
+    // chance to cancel.
+    ingest_handle.abort();
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("[opencrab-memory-mcp] server error: {err}");
@@ -72,6 +144,16 @@ fn resolve_memory_db(agent_id: &str) -> Result<PathBuf, String> {
         "cannot resolve user-layer root (no $HOME / $USERPROFILE / passwd entry)".to_string()
     })?;
     Ok(paths::user_agent_memory_db(&root, agent_id))
+}
+
+/// `<user_root>/agents/<agent_id>/team_sessions/` — the per-agent rollout
+/// directory the S2 ingester scans. See S2-R recon (the codex-cli fork
+/// writes team rollouts here via `ThreadStartParams.session_dir`).
+fn resolve_scan_root(agent_id: &str) -> Result<PathBuf, String> {
+    let root = paths::user_root().ok_or_else(|| {
+        "cannot resolve user-layer root (no $HOME / $USERPROFILE / passwd entry)".to_string()
+    })?;
+    Ok(paths::user_agent_dir(&root, agent_id).join("team_sessions"))
 }
 
 #[cfg(test)]

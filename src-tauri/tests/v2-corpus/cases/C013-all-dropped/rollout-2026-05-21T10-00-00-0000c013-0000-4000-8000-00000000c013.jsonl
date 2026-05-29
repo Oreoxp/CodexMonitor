@@ -1,0 +1,8 @@
+{"timestamp": "2026-05-21T10:00:00.001Z", "type": "session_meta", "payload": {"id": "00000000-0000-4000-8000-000000000000", "cwd": "/Users/USER/code/PROJECT", "originator": "codex_cli", "cli_version": "0.0.0", "instructions": "<base instructions omitted for fixture>"}}
+{"timestamp": "2026-05-21T10:00:00.002Z", "type": "event_msg", "payload": {"type": "task_started", "model_context_window": 200000}}
+{"timestamp": "2026-05-21T10:00:00.003Z", "type": "response_item", "payload": {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "You are operating in a sandboxed workspace. Tools available: edit, write, exec_command. Respect the approval policy and never touch files outside the workspace root. <skills>memory_search, memory_get</skills>"}]}}
+{"timestamp": "2026-05-21T10:00:00.004Z", "type": "turn_context", "payload": {"model": "acme-model-1", "sandbox_policy": "workspace-write", "approval_policy": "on-request"}}
+{"timestamp": "2026-05-21T10:00:00.005Z", "type": "response_item", "payload": {"type": "reasoning", "content": [{"type": "reasoning_text", "text": "用户没有给出实质任务,只是环境初始化,我不需要回复实质内容。"}]}}
+{"timestamp": "2026-05-21T10:00:00.006Z", "type": "event_msg", "payload": {"type": "agent_reasoning", "text": "用户没有给出实质任务。"}}
+{"timestamp": "2026-05-21T10:00:00.007Z", "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"total_tokens": 1234}}}}
+{"timestamp": "2026-05-21T10:00:00.008Z", "type": "event_msg", "payload": {"type": "task_complete", "last_agent_message": ""}}

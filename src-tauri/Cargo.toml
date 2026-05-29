@@ -48,9 +48,15 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # Phase 5 Step 2 — `opencrab-memory-mcp` bin (rmcp stdio MCP server) +
 # the smoke-test client. Version pinned to match the codex-rs workspace.
 rmcp = { version = "0.15.0", default-features = false, features = ["server", "client", "transport-async-rw"] }
+sqlite-vec = "0.1.9"
 
 [dev-dependencies]
 tempfile = "3"
+# V2-corpus runner harness (backend.rs corpus_tests) — parses tests/v2-corpus
+# ground_truth.yaml. 0.9 is the last serde_yaml release (deprecated upstream but
+# still the most widely available); swap to `serde_yml` if a maintained fork is
+# preferred. Local dev-dep only; not shipped.
+serde_yaml = "0.9"
 
 [target."cfg(not(any(target_os = \"android\", target_os = \"ios\")))".dependencies]
 tauri-plugin-window-state = "2"

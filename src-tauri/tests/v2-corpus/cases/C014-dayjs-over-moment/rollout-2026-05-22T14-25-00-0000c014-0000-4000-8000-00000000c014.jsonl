@@ -1,0 +1,16 @@
+{"timestamp": "2026-05-22T14:25:00.001Z", "type": "session_meta", "payload": {"id": "00000000-0000-4000-8000-000000000000", "cwd": "/Users/USER/code/acme-web", "originator": "codex_cli", "cli_version": "0.0.0", "instructions": "<base instructions omitted for fixture>"}}
+{"timestamp": "2026-05-22T14:25:00.002Z", "type": "event_msg", "payload": {"type": "task_started", "model_context_window": 200000}}
+{"timestamp": "2026-05-22T14:25:00.003Z", "type": "response_item", "payload": {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "You are operating in a sandboxed workspace. Tools available: edit, write, exec_command. Respect the approval policy and never touch files outside the workspace root. <skills>memory_search, memory_get</skills>"}]}}
+{"timestamp": "2026-05-22T14:25:00.004Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "前端处理时间这块,我们继续用 moment 还是换别的?现在打包体积有点大。"}]}}
+{"timestamp": "2026-05-22T14:25:00.005Z", "type": "turn_context", "payload": {"model": "acme-model-1", "sandbox_policy": "workspace-write", "approval_policy": "on-request"}}
+{"timestamp": "2026-05-22T14:25:00.006Z", "type": "event_msg", "payload": {"type": "user_message", "message": "前端处理时间这块,我们继续用 moment 还是换别的?现在打包体积有点大。"}}
+{"timestamp": "2026-05-22T14:25:00.007Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "建议换掉 moment。理由:moment.js 官方已经进入维护模式(deprecated),不推荐新功能再用;而且它体积大、不支持 tree-shaking,是你包变大的一个来源。day.js 的 API 跟 moment 基本兼容,gzip 后 2KB 左右,按需加载插件。所以选 day.js。"}]}}
+{"timestamp": "2026-05-22T14:25:00.008Z", "type": "event_msg", "payload": {"type": "agent_message", "message": "建议换掉 moment。理由:moment.js 官方已经进入维护模式(deprecated),不推荐新功能再用;而且它体积大、不支持 tree-shaking,是你包变大的一个来源。day.js 的 API 跟 moment 基本兼容,gzip 后 2KB 左右,按需加载插件。所以选 day.js。"}}
+{"timestamp": "2026-05-22T14:25:00.009Z", "type": "event_msg", "payload": {"type": "task_started", "model_context_window": 200000}}
+{"timestamp": "2026-05-22T14:25:00.010Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "那时间处理统一换成 day.js。"}]}}
+{"timestamp": "2026-05-22T14:25:00.011Z", "type": "turn_context", "payload": {"model": "acme-model-1", "sandbox_policy": "workspace-write", "approval_policy": "on-request"}}
+{"timestamp": "2026-05-22T14:25:00.012Z", "type": "event_msg", "payload": {"type": "user_message", "message": "那时间处理统一换成 day.js。"}}
+{"timestamp": "2026-05-22T14:25:00.013Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "好,时间处理统一用 day.js,逐步替掉 moment。"}]}}
+{"timestamp": "2026-05-22T14:25:00.014Z", "type": "event_msg", "payload": {"type": "agent_message", "message": "好,时间处理统一用 day.js,逐步替掉 moment。"}}
+{"timestamp": "2026-05-22T14:25:00.015Z", "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"total_tokens": 1234}}}}
+{"timestamp": "2026-05-22T14:25:00.016Z", "type": "event_msg", "payload": {"type": "task_complete", "last_agent_message": ""}}

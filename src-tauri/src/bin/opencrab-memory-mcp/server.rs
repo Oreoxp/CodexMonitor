@@ -43,11 +43,15 @@ const GET_TOOL: &str = "memory_get";
 // Tool descriptions are the ONLY thing that tells the model when to reach
 // for these tools (Phase 6's prompt-section work is a later step). They
 // must stand on their own in the tool list.
-const LOG_DESCRIPTION: &str = "Record one progress note in your own personal log. `summary` is \
-a single-sentence headline (required) — what just happened or what you decided. `detail` is the \
-optional longer context that supports it; this is the field that becomes full-text searchable \
-later. Call this whenever something would be worth remembering across conversations or across \
-days — a decision, a finding, a state change, the resolution of a thread.";
+const LOG_DESCRIPTION: &str = "Record one high-signal note in your own personal log — a stumble \
+(and the workaround that finally landed), a decision (and why you took it), a finding (a \
+non-obvious fact about this code or system you didn't know going in), or a hard-won lesson \
+(what next-time-you should do differently). `summary` is a single-sentence headline \
+(required) — what to remember. `detail` is the optional longer context that supports it; this \
+is the field that becomes full-text searchable later. Reach for this tool whenever the entry \
+would save future-you (or another agent picking up this work) from re-discovering the same \
+thing — debugging breakthroughs, design trade-offs, gotchas, recurring patterns. Skip it for \
+routine status pings.";
 
 const SEARCH_DESCRIPTION: &str = "Search your own past progress log — the entries you (and \
 earlier instances of you) saved with `log_progress`. Useful whenever a question touches a past \
@@ -65,14 +69,24 @@ pub struct MemoryMcpServer {
     agent_id: String,
     memory_db: PathBuf,
     tools: Arc<Vec<Tool>>,
+    /// Optional — when `None`, `memory_search` is FTS-only. When `Some`,
+    /// the hybrid path embeds the query and RRF-merges with the vector
+    /// KNN ranking; embedder failures degrade to FTS automatically
+    /// (see `backend::search`).
+    embedder: Option<Arc<backend::HttpEmbedder>>,
 }
 
 impl MemoryMcpServer {
-    pub fn new(agent_id: String, memory_db: PathBuf) -> Self {
+    pub fn new(
+        agent_id: String,
+        memory_db: PathBuf,
+        embedder: Option<backend::HttpEmbedder>,
+    ) -> Self {
         Self {
             agent_id,
             memory_db,
             tools: Arc::new(vec![log_tool(), search_tool(), get_tool()]),
+            embedder: embedder.map(Arc::new),
         }
     }
 }
@@ -138,7 +152,16 @@ impl ServerHandler for MemoryMcpServer {
                     })?;
                 let limit =
                     backend::clamp_limit(arguments.get("limit").and_then(Value::as_u64));
-                let hits = backend::search(&self.memory_db, query, limit)
+                // `backend::search` is async (it may embed the query) +
+                // takes the path; it opens its own conn(s). Cast the
+                // optional `Arc<HttpEmbedder>` to a `&dyn Embedder`
+                // borrow for the duration of the call.
+                let embedder_ref: Option<&dyn backend::Embedder> = self
+                    .embedder
+                    .as_ref()
+                    .map(|a| a.as_ref() as &dyn backend::Embedder);
+                let hits = backend::search(&self.memory_db, embedder_ref, query, limit)
+                    .await
                     .map_err(backend_error_to_mcp)?;
                 let hits_json = serde_json::to_value(&hits).map_err(to_internal)?;
                 json!({ "query": query, "count": hits.len(), "hits": hits_json })
@@ -175,15 +198,19 @@ impl ServerHandler for MemoryMcpServer {
 }
 
 /// Serve the three memory tools over stdio until the client disconnects.
+/// `embedder` is optional — when `None`, `memory_search` is FTS-only;
+/// when `Some`, search is hybrid (FTS bm25 ⊕ vector KNN, RRF-merged)
+/// with automatic FTS-only fallback on any embedder fault.
 pub async fn run_stdio(
     agent_id: String,
     memory_db: PathBuf,
+    embedder: Option<backend::HttpEmbedder>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!(
         "[opencrab-memory-mcp] agent={agent_id} memory_db={}",
         memory_db.display()
     );
-    let server = MemoryMcpServer::new(agent_id, memory_db);
+    let server = MemoryMcpServer::new(agent_id, memory_db, embedder);
     let service = server
         .serve((tokio::io::stdin(), tokio::io::stdout()))
         .await?;

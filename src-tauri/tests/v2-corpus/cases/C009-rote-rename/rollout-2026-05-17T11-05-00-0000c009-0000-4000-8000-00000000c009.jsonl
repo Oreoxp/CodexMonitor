@@ -1,0 +1,14 @@
+{"timestamp": "2026-05-17T11:05:00.001Z", "type": "session_meta", "payload": {"id": "00000000-0000-4000-8000-000000000000", "cwd": "/Users/USER/code/acme-docs", "originator": "codex_cli", "cli_version": "0.0.0", "instructions": "<base instructions omitted for fixture>"}}
+{"timestamp": "2026-05-17T11:05:00.002Z", "type": "event_msg", "payload": {"type": "task_started", "model_context_window": 200000}}
+{"timestamp": "2026-05-17T11:05:00.003Z", "type": "response_item", "payload": {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "You are operating in a sandboxed workspace. Tools available: edit, write, exec_command. Respect the approval policy and never touch files outside the workspace root. <skills>memory_search, memory_get</skills>"}]}}
+{"timestamp": "2026-05-17T11:05:00.004Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "把 docs 目录下所有 markdown 文件名里的空格换成连字符。"}]}}
+{"timestamp": "2026-05-17T11:05:00.005Z", "type": "turn_context", "payload": {"model": "acme-model-1", "sandbox_policy": "workspace-write", "approval_policy": "on-request"}}
+{"timestamp": "2026-05-17T11:05:00.006Z", "type": "event_msg", "payload": {"type": "user_message", "message": "把 docs 目录下所有 markdown 文件名里的空格换成连字符。"}}
+{"timestamp": "2026-05-17T11:05:00.007Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "好的,我来批量重命名。"}]}}
+{"timestamp": "2026-05-17T11:05:00.008Z", "type": "event_msg", "payload": {"type": "agent_message", "message": "好的,我来批量重命名。"}}
+{"timestamp": "2026-05-17T11:05:00.009Z", "type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "arguments": "{\"cmd\": \"cd docs && for f in *\\\\ *.md; do mv \\\"$f\\\" \\\"${f// /-}\\\"; done\"}", "call_id": "c1"}}
+{"timestamp": "2026-05-17T11:05:00.010Z", "type": "response_item", "payload": {"type": "function_call_output", "call_id": "c1", "output": "Chunk ID: a1b2c3\nWall time: 0.04 seconds\nProcess exited with code 0\nOriginal token count: 70\nOutput:\nrenamed 'getting started.md' -> 'getting-started.md'\nrenamed 'api reference.md' -> 'api-reference.md'\nrenamed 'team notes.md' -> 'team-notes.md'\ndone: 3 files"}}
+{"timestamp": "2026-05-17T11:05:00.011Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "改完了,一共重命名了 3 个文件,都成功了。"}]}}
+{"timestamp": "2026-05-17T11:05:00.012Z", "type": "event_msg", "payload": {"type": "agent_message", "message": "改完了,一共重命名了 3 个文件,都成功了。"}}
+{"timestamp": "2026-05-17T11:05:00.013Z", "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"total_tokens": 1234}}}}
+{"timestamp": "2026-05-17T11:05:00.014Z", "type": "event_msg", "payload": {"type": "task_complete", "last_agent_message": ""}}
