@@ -605,10 +605,12 @@ def build_cases():
         "cwd": "/Users/USER/code/acme-api",
         "lines": [
             SM("/Users/USER/code/acme-api"),
-            *first_user("我在想要不要给订单接口加个本地缓存层…"),
-            *asst("可以聊聊。要不要先确认下这个接口的读写比和一致性要求?另外可以先压一遍,看有没有明显热点再决定。"),
+            *first_user("我在想要不要给订单接口加个本地缓存层。"),
+            # Assistant gives ZERO durable advice — only acknowledges + asks to
+            # resume later, so there is no decision/lesson to (wrongly) mine.
+            *asst("可以聊。要不要等你方便的时候我们再细看?需要我先了解哪些背景?"),
             *user("等下,我先去开个会,这个待会儿再聊。"),
-            *asst("好,随时继续。"),
+            *asst("好的,随时继续。"),
             *close(),
         ],
     })
@@ -681,6 +683,338 @@ def build_cases():
             *asst("建议换掉 moment。理由:moment.js 官方已经进入维护模式(deprecated),不推荐新功能再用;而且它体积大、不支持 tree-shaking,是你包变大的一个来源。day.js 的 API 跟 moment 基本兼容,gzip 后 2KB 左右,按需加载插件。所以选 day.js。"),
             *user("那时间处理统一换成 day.js。"),
             *asst("好,时间处理统一用 day.js,逐步替掉 moment。"),
+            *close(),
+        ],
+    })
+
+    # =================================================================
+    # Phase 2 (C015–C040) — S5 relation-pair material + ingest boundary.
+    # contradiction: co-temporal, same-scope present decision, NO switch verbs.
+    # supersede: switch verbs (换到/迁到/改用) + created_at_offset gap.
+    # =================================================================
+
+    # ---- contradiction: API auth — JWT vs server-side session ----
+    cases.append({
+        "id": "C015", "dirname": "C015-auth-jwt",
+        "uuid": "0000c015-0000-4000-8000-00000000c015",
+        "iso": "2026-06-01T09-00-00", "cwd": "/Users/USER/code/acme-api",
+        "lines": [
+            SM("/Users/USER/code/acme-api"),
+            *first_user("我们这个对外 API 的鉴权方案定一下。"),
+            *asst("用 JWT。无状态——鉴权信息自带在 token 里,服务端不用查存储,各实例不共享状态,水平扩展简单。所以对外 API 鉴权就用 JWT,签名用 RS256。"),
+            *close(),
+        ],
+    })
+    cases.append({
+        "id": "C016", "dirname": "C016-auth-session",
+        "uuid": "0000c016-0000-4000-8000-00000000c016",
+        "iso": "2026-06-01T09-30-00", "cwd": "/Users/USER/code/acme-api",
+        "lines": [
+            SM("/Users/USER/code/acme-api"),
+            *first_user("对外 API 的鉴权方案定一下。"),
+            *asst("用服务端 session。token 只是个不透明 id,真正状态存在服务端,这样能即时吊销(踢人立刻生效),也便于逐会话审计。所以对外 API 鉴权用服务端 session,带过期。"),
+            *close(),
+        ],
+    })
+
+    # ---- contradiction: deploy — blue-green vs rolling ----
+    cases.append({
+        "id": "C017", "dirname": "C017-deploy-bluegreen",
+        "uuid": "0000c017-0000-4000-8000-00000000c017",
+        "iso": "2026-06-02T09-00-00", "cwd": "/Users/USER/code/acme-infra",
+        "lines": [
+            SM("/Users/USER/code/acme-infra"),
+            *first_user("发布策略定个方案。"),
+            *asst("用蓝绿部署。两套环境,新版本在绿环境验完一次性切流量,出问题秒级切回蓝环境。我们要求回滚要快,所以发布用蓝绿。"),
+            *close(),
+        ],
+    })
+    cases.append({
+        "id": "C018", "dirname": "C018-deploy-rolling",
+        "uuid": "0000c018-0000-4000-8000-00000000c018",
+        "iso": "2026-06-02T09-30-00", "cwd": "/Users/USER/code/acme-infra",
+        "lines": [
+            SM("/Users/USER/code/acme-infra"),
+            *first_user("发布策略定个方案。"),
+            *asst("用滚动部署。逐批替换实例,不需要双倍容量,省资源。我们集群容量紧,所以发布用滚动部署,配合就绪探针逐批放量。"),
+            *close(),
+        ],
+    })
+
+    # ---- supersede: message queue RabbitMQ -> Kafka ----
+    cases.append({
+        "id": "C019", "dirname": "C019-mq-rabbitmq",
+        "uuid": "0000c019-0000-4000-8000-00000000c019",
+        "iso": "2026-06-03T09-00-00", "cwd": "/Users/USER/code/acme-svc",
+        "lines": [
+            SM("/Users/USER/code/acme-svc"),
+            *first_user("消息队列选个方案。"),
+            *asst("用 RabbitMQ。成熟、运维简单,我们当前的异步任务量它够用。所以消息队列用 RabbitMQ。"),
+            *close(),
+        ],
+    })
+    cases.append({
+        "id": "C020", "dirname": "C020-mq-kafka",
+        "uuid": "0000c020-0000-4000-8000-00000000c020",
+        "iso": "2026-06-06T09-00-00", "cwd": "/Users/USER/code/acme-svc",
+        "lines": [
+            SM("/Users/USER/code/acme-svc"),
+            *first_user("之前用 RabbitMQ,现在量上来了,得重新考虑消息队列。"),
+            *asst("从 RabbitMQ 换到 Kafka。RabbitMQ 在现在的吞吐下扛不住,而且我们需要消息持久化重放(回放历史事件重建状态)和按 key 分区并行消费——这些 Kafka 原生支持。所以消息队列从 RabbitMQ 迁到 Kafka。"),
+            *close(),
+        ],
+    })
+
+    # ---- supersede: frontend state Redux -> Zustand ----
+    cases.append({
+        "id": "C021", "dirname": "C021-state-redux",
+        "uuid": "0000c021-0000-4000-8000-00000000c021",
+        "iso": "2026-06-04T09-00-00", "cwd": "/Users/USER/code/acme-web",
+        "lines": [
+            SM("/Users/USER/code/acme-web"),
+            *first_user("前端状态管理用什么?"),
+            *asst("用 Redux。生态成熟、调试工具好。前端状态管理就用 Redux + Redux Toolkit。"),
+            *close(),
+        ],
+    })
+    cases.append({
+        "id": "C022", "dirname": "C022-state-zustand",
+        "uuid": "0000c022-0000-4000-8000-00000000c022",
+        "iso": "2026-06-06T14-00-00", "cwd": "/Users/USER/code/acme-web",
+        "lines": [
+            SM("/Users/USER/code/acme-web"),
+            *first_user("Redux 那套样板太多了,团队都在抱怨。"),
+            *asst("从 Redux 迁到 Zustand。Redux 的 action/reducer/dispatch 样板代码太多,Zustand 一个 hook 就能管状态,样板少很多、迁移成本也低。所以前端状态管理从 Redux 换成 Zustand。"),
+            *close(),
+        ],
+    })
+
+    # ---- supersede: internal transport REST -> gRPC ----
+    cases.append({
+        "id": "C023", "dirname": "C023-transport-rest",
+        "uuid": "0000c023-0000-4000-8000-00000000c023",
+        "iso": "2026-06-02T10-00-00", "cwd": "/Users/USER/code/acme-svc",
+        "lines": [
+            SM("/Users/USER/code/acme-svc"),
+            *first_user("内部服务之间用什么协议通信?"),
+            *asst("用 REST/JSON。简单、调试方便、工具齐全。内部服务间通信先用 REST。"),
+            *close(),
+        ],
+    })
+    cases.append({
+        "id": "C024", "dirname": "C024-transport-grpc",
+        "uuid": "0000c024-0000-4000-8000-00000000c024",
+        "iso": "2026-06-06T10-00-00", "cwd": "/Users/USER/code/acme-svc",
+        "lines": [
+            SM("/Users/USER/code/acme-svc"),
+            *first_user("内部服务调用链路延迟有点高,JSON 序列化也重。"),
+            *asst("内部服务从 REST 改用 gRPC。gRPC 用 protobuf 二进制,序列化快、延迟低,而且 .proto 的 schema 强类型、便于演进和生成各语言客户端。所以内部服务间通信从 REST 迁到 gRPC。"),
+            *close(),
+        ],
+    })
+
+    # ---- false-neighbor: Postgres connection-pool vs Postgres full-text-search ----
+    cases.append({
+        "id": "C025", "dirname": "C025-pg-pool",
+        "uuid": "0000c025-0000-4000-8000-00000000c025",
+        "iso": "2026-06-07T09-00-00", "cwd": "/Users/USER/code/acme-api",
+        "lines": [
+            SM("/Users/USER/code/acme-api"),
+            *first_user("生产上 Postgres 老报 too many connections,怎么调?"),
+            *asst("是连接池没配好。把应用侧连接池 pool_size 设成 20、加 max_overflow,别让每个请求新建连接;前面再放 PgBouncer 做连接复用。这样连接数稳定在池子上限内,不会打满 Postgres 的 max_connections。"),
+            *close(),
+        ],
+    })
+    cases.append({
+        "id": "C026", "dirname": "C026-pg-fts",
+        "uuid": "0000c026-0000-4000-8000-00000000c026",
+        "iso": "2026-06-07T11-00-00", "cwd": "/Users/USER/code/acme-api",
+        "lines": [
+            SM("/Users/USER/code/acme-api"),
+            *first_user("Postgres 里要做全文检索,怎么建?"),
+            *asst("用 tsvector + GIN 索引。给要检索的列加一个 tsvector 生成列,建 GIN 索引,查询用 to_tsquery 匹配。这样 Postgres 全文检索走索引、不用全表扫。"),
+            *close(),
+        ],
+    })
+
+    # ---- false-neighbor: Redis cache vs Redis distributed lock ----
+    cases.append({
+        "id": "C027", "dirname": "C027-redis-cache",
+        "uuid": "0000c027-0000-4000-8000-00000000c027",
+        "iso": "2026-06-08T09-00-00", "cwd": "/Users/USER/code/acme-api",
+        "lines": [
+            SM("/Users/USER/code/acme-api"),
+            *first_user("热点查询每次打库,想加层缓存。"),
+            *asst("用 Redis 做缓存层。热点查询结果按 key 缓存进 Redis,设 60s TTL,过期自动失效、下次回源。这样大部分读打 Redis 不打库。"),
+            *close(),
+        ],
+    })
+    cases.append({
+        "id": "C028", "dirname": "C028-redis-lock",
+        "uuid": "0000c028-0000-4000-8000-00000000c028",
+        "iso": "2026-06-08T11-00-00", "cwd": "/Users/USER/code/acme-api",
+        "lines": [
+            SM("/Users/USER/code/acme-api"),
+            *first_user("多个实例会同时跑同一个定时任务,得互斥。"),
+            *asst("用 Redis 做分布式锁。抢锁用 SET key val NX EX 30(SETNX + 过期),抢到的实例执行、完了 DEL,过期兜底防死锁。这样同一时刻只有一个实例在跑。"),
+            *close(),
+        ],
+    })
+
+    # ---- false-neighbor: Kafka consumer-offset (app) vs Kafka broker-disk (infra) ----
+    cases.append({
+        "id": "C029", "dirname": "C029-kafka-offset",
+        "uuid": "0000c029-0000-4000-8000-00000000c029",
+        "iso": "2026-06-09T09-00-00", "cwd": "/Users/USER/code/acme-svc",
+        "lines": [
+            SM("/Users/USER/code/acme-svc"),
+            *first_user("Kafka 消费者偶尔重启后会丢几条消息,怎么办?"),
+            *asst("把自动提交 offset 关掉,改成处理成功后手动提交(enable.auto.commit=false,处理完再 commitSync)。这样重启后从最后一条已确认的 offset 继续,不会丢消息。"),
+            *close(),
+        ],
+    })
+    cases.append({
+        "id": "C030", "dirname": "C030-kafka-disk",
+        "uuid": "0000c030-0000-4000-8000-00000000c030",
+        "iso": "2026-06-09T11-00-00", "cwd": "/Users/USER/code/acme-infra",
+        "lines": [
+            SM("/Users/USER/code/acme-infra"),
+            *first_user("Kafka broker 的数据盘选什么文件系统?"),
+            *asst("broker 数据盘用 XFS。XFS 在大文件顺序写和高并发 IO 下比 ext4 好,是 Kafka 官方推荐的 broker 文件系统。所以 Kafka broker 磁盘格式化成 XFS。"),
+            *close(),
+        ],
+    })
+
+    # ---- duplicate: retry jitter (two phrasings) ----
+    cases.append({
+        "id": "C031", "dirname": "C031-retry-jitter-a",
+        "uuid": "0000c031-0000-4000-8000-00000000c031",
+        "iso": "2026-06-05T09-00-00", "cwd": "/Users/USER/code/acme-svc",
+        "lines": [
+            SM("/Users/USER/code/acme-svc"),
+            *first_user("重试逻辑要注意啥?"),
+            *asst("重试一定要加随机 jitter(抖动)。如果所有客户端按固定间隔重试,故障恢复瞬间会同步涌入、形成 thundering herd 把下游再次打垮;加随机抖动把重试时刻打散就能避免。"),
+            *close(),
+        ],
+    })
+    cases.append({
+        "id": "C032", "dirname": "C032-retry-jitter-b",
+        "uuid": "0000c032-0000-4000-8000-00000000c032",
+        "iso": "2026-06-11T09-00-00", "cwd": "/Users/USER/code/acme-svc",
+        "lines": [
+            SM("/Users/USER/code/acme-svc"),
+            *first_user("为啥我们重试都要带个随机延迟?"),
+            *asst("因为不带随机延迟的话,下游一恢复,所有重试会在同一时刻同步打过去,把刚恢复的下游又压垮。所以重试必须带随机抖动,错开各客户端的重试时间。"),
+            *close(),
+        ],
+    })
+
+    # ---- duplicate: stdout logging (two phrasings) ----
+    cases.append({
+        "id": "C033", "dirname": "C033-log-stdout-a",
+        "uuid": "0000c033-0000-4000-8000-00000000c033",
+        "iso": "2026-06-05T10-00-00", "cwd": "/Users/USER/code/acme-svc",
+        "lines": [
+            SM("/Users/USER/code/acme-svc"),
+            *first_user("我们的服务日志怎么输出?"),
+            *asst("日志直接打到 stdout,不要自己写文件。由部署环境的 sidecar(采集 agent)统一从 stdout 收集、转发到日志后端。这样应用不用管轮转、不占本地磁盘。"),
+            *close(),
+        ],
+    })
+    cases.append({
+        "id": "C034", "dirname": "C034-log-stdout-b",
+        "uuid": "0000c034-0000-4000-8000-00000000c034",
+        "iso": "2026-06-11T10-00-00", "cwd": "/Users/USER/code/acme-svc",
+        "lines": [
+            SM("/Users/USER/code/acme-svc"),
+            *first_user("新服务日志要落本地文件吗?"),
+            *asst("不落文件。约定是所有服务只往 stdout 打日志,文件轮转和采集交给 sidecar agent,应用本身不碰磁盘。"),
+            *close(),
+        ],
+    })
+
+    # ---- complement: Postgres store decision + Postgres role-security pattern ----
+    cases.append({
+        "id": "C035", "dirname": "C035-pg-store",
+        "uuid": "0000c035-0000-4000-8000-00000000c035",
+        "iso": "2026-06-07T14-00-00", "cwd": "/Users/USER/code/acme-api",
+        "lines": [
+            SM("/Users/USER/code/acme-api"),
+            *first_user("主数据库定了吗?"),
+            *asst("定 Postgres 做主数据库。需要事务和关系建模,Postgres 成熟稳定。主存储就用 Postgres。"),
+            *close(),
+        ],
+    })
+    cases.append({
+        "id": "C036", "dirname": "C036-pg-role-security",
+        "uuid": "0000c036-0000-4000-8000-00000000c036",
+        "iso": "2026-06-07T15-00-00", "cwd": "/Users/USER/code/acme-api",
+        "lines": [
+            SM("/Users/USER/code/acme-api"),
+            *first_user("应用连 Postgres 用哪个角色?权限怎么分?"),
+            *asst("约定:应用运行时用 app_rw 角色,只授 DML(SELECT/INSERT/UPDATE/DELETE),不给 DDL;所有 schema 变更(DDL)只能走迁移专用账号 migrator 执行。这样即使应用被攻破或代码出 bug,也改不了表结构、删不了表——把 schema 破坏面隔离在迁移流程里。"),
+            *close(),
+        ],
+    })
+
+    # ---- complement: Kafka event-bus decision + Kafka topic-naming pattern ----
+    cases.append({
+        "id": "C037", "dirname": "C037-kafka-bus",
+        "uuid": "0000c037-0000-4000-8000-00000000c037",
+        "iso": "2026-06-09T14-00-00", "cwd": "/Users/USER/code/acme-svc",
+        "lines": [
+            SM("/Users/USER/code/acme-svc"),
+            *first_user("服务间事件用什么传?"),
+            *asst("用 Kafka 做事件总线。各服务把领域事件发到 Kafka,订阅方异步消费,解耦生产和消费。事件总线就用 Kafka。"),
+            *close(),
+        ],
+    })
+    cases.append({
+        "id": "C038", "dirname": "C038-kafka-topic-naming",
+        "uuid": "0000c038-0000-4000-8000-00000000c038",
+        "iso": "2026-06-09T15-00-00", "cwd": "/Users/USER/code/acme-svc",
+        "lines": [
+            SM("/Users/USER/code/acme-svc"),
+            *first_user("Kafka 的 topic 怎么命名?有规范吗?"),
+            *asst("约定 topic 命名为 <domain>.<event>.v<n>,比如 orders.created.v1、payments.refunded.v2。domain 是业务域,event 是事件名,v<n> 是 schema 版本——schema 不兼容升级时升版本号、并行双写,消费方平滑迁移。"),
+            *close(),
+        ],
+    })
+
+    # ---- C039 — long-truncation: head decoy dropped, tail KP survives ----
+    # rendered transcript >> 48k chars. HEAD = a knowledge-shaped GraphQL decoy
+    # (dropped); TAIL = the durable shadow-table KP (kept). Filler is neutral
+    # (no 'GraphQL' / '影子表' / 'shadow' / 'ALTER').
+    c039 = [SM("/Users/USER/code/acme-legacy")]
+    c039 += first_user("帮我把这个老服务梳理一遍,边看边记笔记。")
+    c039 += asst("先记个结论:对外 API 我们决定改用 GraphQL,因为前端要灵活查询字段,REST 的固定端点不够灵活。")  # HEAD decoy
+    _filler = (
+        "src/handlers/orders.rs\nsrc/handlers/payments.rs\nsrc/handlers/users.rs\n"
+        "src/db/pool.rs  src/util/retry.rs  src/util/clock.rs\n"
+        + ("// routine inventory pass over the legacy handlers: noting struct fields, "
+           "function signatures, and call sites; nothing surprising, just cataloguing. " * 18)
+    )
+    for i in range(26):
+        c039 += [CALL("exec_command", {"cmd": f"sed -n '1,200p' src/module_{i:02d}.rs"}, cid=f"f{i}")]
+        c039 += [OUT(env(_filler, tokens=400, chunk=f"{i:06x}"), cid=f"f{i}")]
+    c039 += asst("排查完成。关键教训:对大表直接 ALTER 会长时间持有锁、导致线上停服。正确做法是先建影子表(shadow table),双写并回放校验数据一致后,再原子切换。以后大表迁移一律走影子表方案。")  # TAIL KP
+    c039 += close()
+    cases.append({
+        "id": "C039", "dirname": "C039-long-truncation",
+        "uuid": "0000c039-0000-4000-8000-00000000c039",
+        "iso": "2026-06-10T09-00-00", "cwd": "/Users/USER/code/acme-legacy",
+        "lines": c039,
+    })
+
+    # ---- C040 — summary-fts (v8 material): Chinese discriminator lands in summary ----
+    cases.append({
+        "id": "C040", "dirname": "C040-summary-fts-ratelimit",
+        "uuid": "0000c040-0000-4000-8000-00000000c040",
+        "iso": "2026-06-12T09-00-00", "cwd": "/Users/USER/code/acme-api",
+        "lines": [
+            SM("/Users/USER/code/acme-api"),
+            *first_user("限流的阈值应该按什么设?按平均 QPS 吗?"),
+            *asst("不要按平均设。限流阈值应该按 P99 峰值流量来定,按平均会在尖峰时段误杀正常请求。所以限流阈值取 P99,再留一点 headroom。"),
             *close(),
         ],
     })

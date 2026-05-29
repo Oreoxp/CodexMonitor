@@ -1,70 +1,80 @@
-# V2 Corpus — coverage matrix (dimension -> cases that hit it).
-# Mirrors the layered taxonomy in the spec §4. Empty dimensions name the phase
-# that will fill them. Source of truth for tags = each case's `tags:` field;
-# this file is the aggregation. Phase 1 = 14 cases (C001..C014).
+# V2 Corpus — coverage matrix (dimension -> cases). Phase 2 = 40 cases.
+# Source of truth for tags = each case's `tags:`; this file aggregates.
+# Empty dimensions name the phase that fills them.
 
-phase: 1
-case_count: 14
+phase: 2
+case_count: 40
 
 # ---- S2 (ingest / parse_line classification) ----
 s2:
-  single-thread:            [C001, C002, C003, C004, C005, C006, C007, C008, C009, C010, C011, C013, C014]
+  single-thread:            [C001, C002, C003, C004, C005, C006, C007, C008, C009, C010, C011, C013, C014, C015, C016, C017, C018, C019, C020, C021, C022, C023, C024, C025, C026, C027, C028, C029, C030, C031, C032, C033, C034, C035, C036, C037, C038, C040]
   multi-segment-compaction: [C012]
   all-dropped:              [C013]
-  mixed-keep-drop:          [C001, C002, C003, C005]
-  tool-call-output-pairs:   [C001, C003, C004, C005, C006, C007, C009, C012]
+  tool-call-output-pairs:   [C001, C003, C004, C005, C006, C007, C009, C012, C039]
   utf8-multibyte:           [C006]
-  long-thread:              []          # Phase 3 (needs a >100-line / >48k-char sample)
+  long-truncation:          [C039]          # >48k rendered chars; keep-tail/drop-head
 
-# ---- S3 (distillation) — positive: should yield KP(s) ----
+# ---- S3 (distillation) — positive (case-level content gate; kind advisory) ----
 s3_positive:
-  kind-decision: [C001, C002, C012, C014]   # C012 = post-boundary segment
-  kind-failure:  [C003, C004]
-  kind-pattern:  [C005]
-  kind-fact:     [C006, C007]
+  kind-decision: [C001, C002, C012, C014, C015, C016, C017, C018, C019, C020, C021, C022, C023, C024, C035, C037]
+  kind-failure:  [C003, C004, C039]
+  kind-pattern:  [C005, C025, C026, C027, C028, C029, C031, C032, C033, C034, C036, C038, C040]
+  kind-fact:     [C006, C007, C030]
+  # NOTE: kind is ADVISORY in the harness (temp 0.2 framing varies); the above
+  # is the *intended* framing, not a hard assertion.
 
 # ---- S3 — reverse: should yield [] ----
 s3_reverse:
   greeting-only:             [C008]
   task-complete-no-learning: [C009]
   chitchat:                  [C010]
-  aborted:                   [C011]
-  meta-only:                 []          # Phase 2
+  aborted:                   [C011]          # hardened: assistant gives zero durable advice
 
 # ---- S3 — boundary / language ----
 s3_boundary:
-  long-truncation:    []                  # Phase 3 (>48k-char segment)
-  pure-zh:            [C010, C011]
-  pure-en:            [C004, C008]
-  mixed-zh-en:        [C001, C002, C003, C005, C006, C007, C009, C012, C014]
+  pure-zh:            [C010, C011, C017, C018, C035, C040]
+  pure-en:           [C004, C008]
+  mixed-zh-en:        [C001, C002, C003, C005, C006, C007, C009, C012, C014, C015, C016, C019, C020, C021, C022, C023, C024, C025, C026, C027, C028, C029, C030, C031, C032, C033, C034, C036, C037, C038, C039]
   with-prior-summary: [C012]
   noisy-tool-output:  [C003, C007]
+  summary-fts-v8:     [C040]                 # CJK discriminator lands in summary (v8 gap)
 
-# ---- S4 (retrieval) — most query composition is harness-driven across the
-# whole corpus; only cases carrying their own expected_search are listed. ----
+# ---- S4 (retrieval) — scenario-scoped (one DB per group) ----
 s4:
-  lexical-only-hit:          []           # Phase 2/3 (harness composes queries)
-  semantic-only-hit:         []           # Phase 2/3
-  both-hit-same-order:       []           # Phase 2/3
-  both-hit-different-order:  []           # Phase 2/3
-  cross-topic-false-neighbor: [C001]      # C001 carries a cross-topic negative query (vs C014)
+  cross-topic-false-neighbor: [C001]         # C001 carries cross-topic negative query (vs C014, session group)
+  summary-fts-observe:        [C040]         # FTS-only = 0 in v7 (documented v8 gap)
 
-# ---- S5 (consolidation) ----
-s5:
-  duplicate:                  []          # Phase 2
-  complement:                 []          # Phase 2
-  contradiction:              [C001, C002]
-  supersede:                  []          # Phase 2/3 (needs created_at_offset / compaction order)
-  cross-topic-false-neighbor: []          # Phase 2
+# ---- S5 (consolidation) — relation pairs (data + ground_truth only; no Layer D yet) ----
+s5_relations:
+  contradiction:   [[C001, C002], [C015, C016], [C017, C018]]
+  supersede:       [[C019, C020], [C021, C022], [C023, C024]]    # older.superseded_by newer (created_at_offset)
+  false_neighbor:  [[C025, C026], [C027, C028], [C029, C030]]    # near but no_action (precision gate)
+  duplicate:       [[C031, C032], [C033, C034]]                  # near-synonym -> merge
+  complement:      [[C035, C036], [C037, C038]]                  # same topic, both survive (cluster)
+  # accidental intra-group no_action audited explicitly where it is a precision
+  # signal (e.g. messaging cross-time C020<->C023); far pairs default no_action.
 
-# ---- end-to-end composite ----
-e2e:
-  composite-workflow: []                  # Phase 3 (10-20 cases stacked as one agent's workflow)
+# ---- S5 scenario groups (co-located = one DB; S5 considers all intra-group pairs) ----
+s5_groups:
+  session:        [C001, C002, C014]   # contradiction + C014 cross-topic anchor
+  auth:           [C015, C016]         # contradiction
+  deploy:         [C017, C018]         # contradiction
+  messaging:      [C019, C020, C023, C024]  # RICH: 2 supersede + 4 audited no_action (incl cross-time trap)
+  frontend:       [C021, C022]         # supersede
+  pg-aspects:     [C025, C026]         # false_neighbor
+  redis-aspects:  [C027, C028]         # false_neighbor
+  kafka-aspects:  [C029, C030]         # false_neighbor (orthogonal layers)
+  retry-dup:      [C031, C032]         # duplicate
+  logging-dup:    [C033, C034]         # duplicate
+  pg-store:       [C035, C036]         # complement
+  kafka-bus:      [C037, C038]         # complement
+  ratelimit:      [C040]               # summary-fts search
+  ungrouped:      [C003, C004, C005, C006, C007, C008, C009, C010, C012, C013, C039]  # Layer-B only
 
 # ---- reverse index: case -> declared tags ----
 cases:
-  C001: [single-thread, kind-decision, mixed-keep-drop, tool-call-output-pairs, mixed-zh-en, cross-topic-false-neighbor]
-  C002: [single-thread, kind-decision, mixed-keep-drop, mixed-zh-en]
+  C001: [single-thread, kind-decision, mixed-keep-drop, tool-call-output-pairs, mixed-zh-en, cross-topic-false-neighbor, s5-contradiction, group-session]
+  C002: [single-thread, kind-decision, mixed-keep-drop, mixed-zh-en, s5-contradiction, group-session]
   C003: [single-thread, kind-failure, tool-call-output-pairs, noisy-tool-output, mixed-keep-drop, mixed-zh-en]
   C004: [single-thread, kind-failure, tool-call-output-pairs, pure-en]
   C005: [single-thread, kind-pattern, tool-call-output-pairs, mixed-keep-drop, mixed-zh-en]
@@ -76,12 +86,30 @@ cases:
   C011: [single-thread, aborted, pure-zh]
   C012: [multi-segment-compaction, with-prior-summary, kind-decision, tool-call-output-pairs, mixed-zh-en]
   C013: [single-thread, all-dropped]
-  C014: [single-thread, kind-decision, mixed-zh-en]
-
-# ---- language distribution (Phase 1; full-corpus target is 60/25/15 zh/mixed/en) ----
-language_distribution:
-  zh_only:     [C010, C011, C013]
-  zh_majority: [C001, C002, C003, C005, C007, C009, C012, C014]
-  mixed:       [C006]
-  en_only:     [C004, C008]
-  note: "Phase 1 skews zh (core-coverage first); Phase 2 rebalances toward the 60/25/15 target."
+  C014: [single-thread, kind-decision, mixed-zh-en, group-session]
+  C015: [s5-contradiction, kind-decision, mixed-zh-en, group-auth]
+  C016: [s5-contradiction, kind-decision, mixed-zh-en, group-auth]
+  C017: [s5-contradiction, kind-decision, pure-zh, group-deploy]
+  C018: [s5-contradiction, kind-decision, pure-zh, group-deploy]
+  C019: [s5-supersede, kind-decision, mixed-zh-en, group-messaging]
+  C020: [s5-supersede, kind-decision, mixed-zh-en, group-messaging]
+  C021: [s5-supersede, kind-decision, mixed-zh-en, group-frontend]
+  C022: [s5-supersede, kind-decision, mixed-zh-en, group-frontend]
+  C023: [s5-supersede, kind-decision, mixed-zh-en, group-messaging]
+  C024: [s5-supersede, kind-decision, mixed-zh-en, group-messaging]
+  C025: [s5-false-neighbor, kind-pattern, mixed-zh-en, group-pg-aspects]
+  C026: [s5-false-neighbor, kind-pattern, mixed-zh-en, group-pg-aspects]
+  C027: [s5-false-neighbor, kind-pattern, mixed-zh-en, group-redis-aspects]
+  C028: [s5-false-neighbor, kind-pattern, mixed-zh-en, group-redis-aspects]
+  C029: [s5-false-neighbor, kind-pattern, mixed-zh-en, group-kafka-aspects]
+  C030: [s5-false-neighbor, kind-fact, mixed-zh-en, group-kafka-aspects]
+  C031: [s5-duplicate, kind-pattern, mixed-zh-en, group-retry-dup]
+  C032: [s5-duplicate, kind-pattern, mixed-zh-en, group-retry-dup]
+  C033: [s5-duplicate, kind-pattern, mixed-zh-en, group-logging-dup]
+  C034: [s5-duplicate, kind-pattern, mixed-zh-en, group-logging-dup]
+  C035: [s5-complement, kind-decision, pure-zh, group-pg-store]
+  C036: [s5-complement, kind-pattern, mixed-zh-en, group-pg-store]
+  C037: [s5-complement, kind-decision, mixed-zh-en, group-kafka-bus]
+  C038: [s5-complement, kind-pattern, mixed-zh-en, group-kafka-bus]
+  C039: [s2-long-truncation, kind-failure, mixed-zh-en]
+  C040: [summary-fts-v8, kind-pattern, pure-zh, group-ratelimit]

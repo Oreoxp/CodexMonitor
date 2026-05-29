@@ -1,0 +1,10 @@
+{"timestamp": "2026-06-07T09:00:00.001Z", "type": "session_meta", "payload": {"id": "00000000-0000-4000-8000-000000000000", "cwd": "/Users/USER/code/acme-api", "originator": "codex_cli", "cli_version": "0.0.0", "instructions": "<base instructions omitted for fixture>"}}
+{"timestamp": "2026-06-07T09:00:00.002Z", "type": "event_msg", "payload": {"type": "task_started", "model_context_window": 200000}}
+{"timestamp": "2026-06-07T09:00:00.003Z", "type": "response_item", "payload": {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "You are operating in a sandboxed workspace. Tools available: edit, write, exec_command. Respect the approval policy and never touch files outside the workspace root. <skills>memory_search, memory_get</skills>"}]}}
+{"timestamp": "2026-06-07T09:00:00.004Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "生产上 Postgres 老报 too many connections,怎么调?"}]}}
+{"timestamp": "2026-06-07T09:00:00.005Z", "type": "turn_context", "payload": {"model": "acme-model-1", "sandbox_policy": "workspace-write", "approval_policy": "on-request"}}
+{"timestamp": "2026-06-07T09:00:00.006Z", "type": "event_msg", "payload": {"type": "user_message", "message": "生产上 Postgres 老报 too many connections,怎么调?"}}
+{"timestamp": "2026-06-07T09:00:00.007Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "是连接池没配好。把应用侧连接池 pool_size 设成 20、加 max_overflow,别让每个请求新建连接;前面再放 PgBouncer 做连接复用。这样连接数稳定在池子上限内,不会打满 Postgres 的 max_connections。"}]}}
+{"timestamp": "2026-06-07T09:00:00.008Z", "type": "event_msg", "payload": {"type": "agent_message", "message": "是连接池没配好。把应用侧连接池 pool_size 设成 20、加 max_overflow,别让每个请求新建连接;前面再放 PgBouncer 做连接复用。这样连接数稳定在池子上限内,不会打满 Postgres 的 max_connections。"}}
+{"timestamp": "2026-06-07T09:00:00.009Z", "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"total_tokens": 1234}}}}
+{"timestamp": "2026-06-07T09:00:00.010Z", "type": "event_msg", "payload": {"type": "task_complete", "last_agent_message": ""}}

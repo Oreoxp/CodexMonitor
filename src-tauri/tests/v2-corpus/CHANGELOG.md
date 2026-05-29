@@ -1,5 +1,62 @@
 # Corpus CHANGELOG
 
+## Phase 2 — 26 new cases (C015–C040), → 40 total
+
+Main goal: S5 (consolidation) relation-pair material, plus ingest-boundary +
+C011 hardening + v8 (summary-FTS) material. Built on the committed v7 harness
+(bge-m3@1024, trigram log_fts, kind-advisory).
+
+### New cases by S5 relation class (12 pairs)
+- **contradiction** (co-temporal, same-scope present decision, NO switch verbs):
+  C001↔C002 (session PG/Redis, existing), **C015↔C016** (auth JWT/session),
+  **C017↔C018** (deploy blue-green/rolling).
+- **supersede** (switch verbs + `created_at_offset_hours` gap; older.superseded_by newer):
+  **C019→C020** (MQ RabbitMQ→Kafka, −72h/0), **C021→C022** (Redux→Zustand, −48h/0),
+  **C023→C024** (REST→gRPC, −96h/0).
+- **false_neighbor** (vector-near, no_action — the S5 precision gate; each pair
+  carries a per-pair "why noise" reason): **C025↔C026** (PG pool vs PG FTS),
+  **C027↔C028** (Redis cache vs lock), **C029↔C030** (Kafka consumer-offset vs
+  broker-disk — orthogonal app/infra layers; replaced the weaker 限流/熔断 idea
+  per review, which leaned complement).
+- **duplicate** (near-synonym → merge): **C031↔C032** (retry jitter), **C033↔C034** (stdout logging).
+- **complement** (same topic, both survive → cluster): **C035↔C036** (PG store
+  decision + **PG role-security pattern** — C036 made a durable security
+  convention-with-rationale, not config trivia, so No-Echo won't drop it),
+  **C037↔C038** (Kafka bus decision + topic-naming pattern).
+
+### Other
+- **C011 hardened** — assistant now gives zero durable advice (only acknowledges +
+  asks to resume), so the aborted thread has nothing to (wrongly) mine → stable `[]`.
+- **C039 long-truncation** — rendered transcript ~78k chars (> 48k cap); HEAD
+  GraphQL decoy at offset 143 (dropped), TAIL shadow-table KP at ~77.9k (kept).
+  Layer B asserts tail KP present + `GraphQL` forbidden = keep-tail/drop-head proof.
+- **C040 summary-fts (v8 material)** — "限流阈值按 P99" lesson; the Chinese
+  discriminator lands in **summary**. v7: passes Layer C via vector; FTS-only = 0
+  (the documented v8 gap). **Caveat:** its v8 value depends on the LLM placing
+  "限流阈值" in the summary (temp-0.2 jitter) — a v8 FTS-recall test MUST first
+  verify the summary actually contains the substring, then assert recall (a
+  defensive/conditional assertion, like kind-advisory & C011-jitter).
+
+### Harness changes (corpus_tests.rs)
+- `ConsolidationRelation` + `relation` field ({duplicate|supersede|contradiction|
+  complement|false_neighbor}) — action alone can't encode S5's verdict.
+- `GroundTruth` + `group` (scenario co-location), `created_at_offset_hours`,
+  `expected_distill_case_level_forbidden` (case-level anti-hallucination).
+- Layer C **refactored to per-group DBs** (one DB per `group`) — a 40-case
+  mega-DB would make top-K noisy; S5 is tested on controlled neighborhoods. The
+  existing C001 queries (membership PG+Redis; day.js cross-topic) now run in the
+  `session` group DB. Layer C also measures **bge-m3 KP-distance per relation
+  pair** → the distribution S5-design uses for candidate threshold T.
+
+### torn-line — SKIPPED
+Already covered by backend unit tests `s2if_a1` / `s2if_a2` (two-pass write→ingest);
+a static corpus file always has a trailing `\n` so it can't exercise it.
+
+### Verification (live Layer B/C results + accidental-neighbor audit + distance
+### distribution are in the Phase-2 2b report)
+- Layer A + full schema suite: **145 passed / 0 failed** (incl all 40 cases).
+- `corpus_tool.py verify`: 40/40 `expected_ingest` PASS; self-check (parse_line) clean.
+
 ## Phase 1 — 14 cases (C001–C014)
 
 First batch: close the end-to-end loop (directory layout, ground-truth field

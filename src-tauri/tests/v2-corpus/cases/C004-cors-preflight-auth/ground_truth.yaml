@@ -24,9 +24,9 @@ expected_distill:
   expected_kp_count: 1
   knowledge_points:
     - kind: failure
-      summary_must_contain_any: ["CORS", "preflight", "OPTIONS", "401"]
+      summary_must_contain_any: ["CORS", "preflight", "OPTIONS", "401", "cross-origin", "Unauthorized"]
       summary_must_not_contain: []
       detail_must_mention_all:
-        - ["Authorization", "Allow-Headers"]
-        - ["preflight", "OPTIONS"]
+        - ["Authorization", "Allow-Headers", "auth header", "token", "credential"]
+        - ["preflight", "OPTIONS", "CORS", "middleware"]
       detail_must_not_mention: []

@@ -1,0 +1,10 @@
+{"timestamp": "2026-06-06T09:00:00.001Z", "type": "session_meta", "payload": {"id": "00000000-0000-4000-8000-000000000000", "cwd": "/Users/USER/code/acme-svc", "originator": "codex_cli", "cli_version": "0.0.0", "instructions": "<base instructions omitted for fixture>"}}
+{"timestamp": "2026-06-06T09:00:00.002Z", "type": "event_msg", "payload": {"type": "task_started", "model_context_window": 200000}}
+{"timestamp": "2026-06-06T09:00:00.003Z", "type": "response_item", "payload": {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "You are operating in a sandboxed workspace. Tools available: edit, write, exec_command. Respect the approval policy and never touch files outside the workspace root. <skills>memory_search, memory_get</skills>"}]}}
+{"timestamp": "2026-06-06T09:00:00.004Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "之前用 RabbitMQ,现在量上来了,得重新考虑消息队列。"}]}}
+{"timestamp": "2026-06-06T09:00:00.005Z", "type": "turn_context", "payload": {"model": "acme-model-1", "sandbox_policy": "workspace-write", "approval_policy": "on-request"}}
+{"timestamp": "2026-06-06T09:00:00.006Z", "type": "event_msg", "payload": {"type": "user_message", "message": "之前用 RabbitMQ,现在量上来了,得重新考虑消息队列。"}}
+{"timestamp": "2026-06-06T09:00:00.007Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "从 RabbitMQ 换到 Kafka。RabbitMQ 在现在的吞吐下扛不住,而且我们需要消息持久化重放(回放历史事件重建状态)和按 key 分区并行消费——这些 Kafka 原生支持。所以消息队列从 RabbitMQ 迁到 Kafka。"}]}}
+{"timestamp": "2026-06-06T09:00:00.008Z", "type": "event_msg", "payload": {"type": "agent_message", "message": "从 RabbitMQ 换到 Kafka。RabbitMQ 在现在的吞吐下扛不住,而且我们需要消息持久化重放(回放历史事件重建状态)和按 key 分区并行消费——这些 Kafka 原生支持。所以消息队列从 RabbitMQ 迁到 Kafka。"}}
+{"timestamp": "2026-06-06T09:00:00.009Z", "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"total_tokens": 1234}}}}
+{"timestamp": "2026-06-06T09:00:00.010Z", "type": "event_msg", "payload": {"type": "task_complete", "last_agent_message": ""}}

@@ -1,0 +1,10 @@
+{"timestamp": "2026-06-05T09:00:00.001Z", "type": "session_meta", "payload": {"id": "00000000-0000-4000-8000-000000000000", "cwd": "/Users/USER/code/acme-svc", "originator": "codex_cli", "cli_version": "0.0.0", "instructions": "<base instructions omitted for fixture>"}}
+{"timestamp": "2026-06-05T09:00:00.002Z", "type": "event_msg", "payload": {"type": "task_started", "model_context_window": 200000}}
+{"timestamp": "2026-06-05T09:00:00.003Z", "type": "response_item", "payload": {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "You are operating in a sandboxed workspace. Tools available: edit, write, exec_command. Respect the approval policy and never touch files outside the workspace root. <skills>memory_search, memory_get</skills>"}]}}
+{"timestamp": "2026-06-05T09:00:00.004Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "重试逻辑要注意啥?"}]}}
+{"timestamp": "2026-06-05T09:00:00.005Z", "type": "turn_context", "payload": {"model": "acme-model-1", "sandbox_policy": "workspace-write", "approval_policy": "on-request"}}
+{"timestamp": "2026-06-05T09:00:00.006Z", "type": "event_msg", "payload": {"type": "user_message", "message": "重试逻辑要注意啥?"}}
+{"timestamp": "2026-06-05T09:00:00.007Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "重试一定要加随机 jitter(抖动)。如果所有客户端按固定间隔重试,故障恢复瞬间会同步涌入、形成 thundering herd 把下游再次打垮;加随机抖动把重试时刻打散就能避免。"}]}}
+{"timestamp": "2026-06-05T09:00:00.008Z", "type": "event_msg", "payload": {"type": "agent_message", "message": "重试一定要加随机 jitter(抖动)。如果所有客户端按固定间隔重试,故障恢复瞬间会同步涌入、形成 thundering herd 把下游再次打垮;加随机抖动把重试时刻打散就能避免。"}}
+{"timestamp": "2026-06-05T09:00:00.009Z", "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"total_tokens": 1234}}}}
+{"timestamp": "2026-06-05T09:00:00.010Z", "type": "event_msg", "payload": {"type": "task_complete", "last_agent_message": ""}}

@@ -53,10 +53,26 @@ struct GroundTruth {
     /// across multiple KPs or frames under a variable `kind`.
     #[serde(default)]
     expected_distill_case_level: Vec<Vec<String>>,
+    /// Case-level forbidden tokens: none may appear in ANY distilled row's
+    /// summary+detail (anti-hallucination; proves a relation member's wording is
+    /// clean of the partner's distinctive term, e.g. C015/JWT must not say
+    /// "session"). Checked in the positive branch alongside `case_level`.
+    #[serde(default)]
+    expected_distill_case_level_forbidden: Vec<String>,
     #[serde(default)]
     expected_search: Vec<ExpectedSearch>,
     #[serde(default)]
     consolidation_relations: Vec<ConsolidationRelation>,
+    /// Scenario group: cases sharing a `group` are co-located in ONE DB for
+    /// S5 / Layer C (S5 merges neighbors within a DB). Empty ⇒ ungrouped
+    /// (Layer-B-only, no retrieval DB).
+    #[serde(default)]
+    group: String,
+    /// Supersede/contradiction temporal annotation (hours; negative = earlier).
+    /// The future S5 runner injects `log.ts` from this (§10.8 — supersede order
+    /// comes from ts + content, never `parent_thread_id`).
+    #[serde(default)]
+    created_at_offset_hours: Option<i64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -133,6 +149,12 @@ struct ExpectedSearch {
 struct ConsolidationRelation {
     #[serde(default)]
     with_case: String,
+    /// The S5 relation KIND — {duplicate|supersede|contradiction|complement|
+    /// false_neighbor}. Distinct from `expected_action`: duplicate+supersede
+    /// share `superseded_by`, complement+false_neighbor both "keep both", so
+    /// the action alone can't encode S5's verdict (S5 audit records the kind).
+    #[serde(default)]
+    relation: String,
     #[serde(default)]
     expected_action: String,
     #[serde(default)]
@@ -488,7 +510,9 @@ fn check_layer_b(c: &Case, extractor: &HttpExtractor) -> Result<String, String> 
         // must have a token somewhere across ALL distilled rows concatenated.
         // Used where the LLM splits one lesson across KPs (C003) or kinds it
         // variably (C006).
-        if !c.gt.expected_distill_case_level.is_empty() {
+        if !c.gt.expected_distill_case_level.is_empty()
+            || !c.gt.expected_distill_case_level_forbidden.is_empty()
+        {
             let haystack = rows
                 .iter()
                 .map(|(k, s, d)| format!("{k}\n{s}\n{}", d.as_deref().unwrap_or("")))
@@ -497,6 +521,12 @@ fn check_layer_b(c: &Case, extractor: &HttpExtractor) -> Result<String, String> 
             for set in &c.gt.expected_distill_case_level {
                 if !any_ci(&haystack, set) {
                     errs.push(format!("case-level: no distilled row text matches any of {set:?}"));
+                }
+            }
+            // Case-level forbidden: anti-hallucination / clean-separation guard.
+            for f in &c.gt.expected_distill_case_level_forbidden {
+                if ci_contains(&haystack, f) {
+                    errs.push(format!("case-level forbidden token {f:?} appeared in a distilled row"));
                 }
             }
         }
@@ -540,11 +570,56 @@ fn corpus_layer_b_distill() {
 }
 
 // ===========================================================================
-// LAYER C — retrieval, live. #[ignore]. Stack the whole corpus into one DB,
-// distill + embed, then run each case's expected_search through the real
-// hybrid search at the PRODUCTION default 8s embed budget (QUERY_EMBED_TIMEOUT),
-// and report the measured query-embed wall time.
+// LAYER C — retrieval, live. #[ignore]. SCENARIO-SCOPED: ONE DB per `group`
+// (S5 merges neighbors within a DB; a 40-case mega-DB makes top-K noisy and S5
+// should be tested on controlled neighborhoods). Per group: ingest → distill →
+// embed → run that group's expected_search at the production 8s budget (with
+// query-embed wall time + FTS-only contribution), and measure the bge-m3
+// distance between annotated relation pairs (the distribution S5-design uses to
+// pick the candidate threshold T). Ungrouped cases are Layer-B-only.
 // ===========================================================================
+
+/// First distilled log row whose summary+detail contains any of `tokens`.
+fn find_distilled_id(conn: &Connection, tokens: &[String]) -> Option<i64> {
+    let mut stmt = conn
+        .prepare("SELECT id, summary, detail FROM log WHERE origin='distill' ORDER BY id")
+        .ok()?;
+    let rows: Vec<(i64, String, Option<String>)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .ok()?
+        .filter_map(|r| r.ok())
+        .collect();
+    rows.into_iter()
+        .find(|(_, s, d)| any_ci(&format!("{s}\n{}", d.as_deref().unwrap_or("")), tokens))
+        .map(|(id, _, _)| id)
+}
+
+fn summary_of(conn: &Connection, id: i64) -> String {
+    conn.query_row("SELECT summary FROM log WHERE id=?1", params![id], |r| r.get(0))
+        .unwrap_or_default()
+}
+
+/// bge-m3 distance between two distilled KPs (A re-embedded as the query, KNN
+/// against B's stored log_vec vector) — what S5 candidate selection would see.
+fn kp_distance(conn: &Connection, emb: &dyn Embedder, id_a: i64, id_b: i64) -> Option<f64> {
+    let (sa, da): (String, Option<String>) = conn
+        .query_row("SELECT summary, detail FROM log WHERE id=?1", params![id_a], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .ok()?;
+    let text_a = format!("{}\n\n{}", sa, da.unwrap_or_default());
+    let qv = block_on(emb.embed(&[text_a])).ok()?;
+    let qjson = vec_to_match_json(qv.first()?);
+    let mut stmt = conn
+        .prepare("SELECT rowid, distance FROM log_vec WHERE embedding MATCH ?1 AND k = ?2 ORDER BY distance")
+        .ok()?;
+    let rows: Vec<(i64, f64)> = stmt
+        .query_map(params![qjson, 64_i64], |r| Ok((r.get(0)?, r.get(1)?)))
+        .ok()?
+        .filter_map(|r| r.ok())
+        .collect();
+    rows.iter().find(|(rid, _)| *rid == id_b).map(|(_, d)| *d)
+}
 
 #[test]
 #[ignore]
@@ -557,118 +632,136 @@ fn corpus_layer_c_search() {
         eprintln!("[corpus C] no embedder config — SKIPPING");
         return;
     };
-    let cases = load_cases();
-    let agent = cases[0].gt.agent_id.clone();
-
-    // Shared DB + one scan tree holding every case (co-located).
-    let tmp = tempfile::tempdir().unwrap();
-    let scan_root = tmp.path().join("agents").join(&agent).join("team_sessions");
-    for c in &cases {
-        stage_rollout(&scan_root, c);
-    }
-    let db = tmp.path().join("memory.db");
-    let conn = open(&db).unwrap();
-    let ing = ingest_once(&conn, &scan_root, &agent).unwrap();
-    eprintln!("[corpus C] ingest: {ing:?}");
-
-    // Distill everything (forces idle gate) + embed all pending log rows.
-    let now_ms = current_time_ms() + DISTILL_IDLE_MS + 60_000;
-    let dstats = block_on(distill_once(&conn, &extractor, now_ms)).expect("distill_once");
-    eprintln!("[corpus C] distill: {dstats:?}");
-    let estats = block_on(embed_pending_once(&conn, &embedder)).expect("embed_pending_once");
-    eprintln!("[corpus C] embed: {estats:?}");
     let emb: &dyn Embedder = &embedder;
+    let cases = load_cases();
+    let by_id: std::collections::HashMap<String, &Case> =
+        cases.iter().map(|c| (c.id.clone(), c)).collect();
+    let mut groups: std::collections::BTreeMap<String, Vec<&Case>> = std::collections::BTreeMap::new();
+    for c in &cases {
+        if !c.gt.group.is_empty() {
+            groups.entry(c.gt.group.clone()).or_default().push(c);
+        }
+    }
 
     let mut failures: Vec<String> = Vec::new();
     let mut search_count = 0u32;
-    for c in &cases {
-        for es in &c.gt.expected_search {
-            search_count += 1;
-            let limit = if es.limit == 0 { 3 } else { es.limit as usize };
-            // Measure pure query-embed wall time — proves bge-m3 fits the
-            // production 8s QUERY_EMBED_TIMEOUT window (Qwen3-8B did not).
-            let t0 = std::time::Instant::now();
-            let qemb = block_on(emb.embed(&[es.query.clone()]));
-            let embed_secs = t0.elapsed().as_secs_f64();
-            let qdim = qemb.as_ref().ok().and_then(|v| v.first()).map(|v| v.len()).unwrap_or(0);
-            eprintln!(
-                "[corpus C] {} query-embed wall={:.2}s dim={} (budget {:?}) query={:?}",
-                c.id, embed_secs, qdim, QUERY_EMBED_TIMEOUT, es.query
-            );
-            // Observe the lexical (FTS/trigram) half in ISOLATION — proves the
-            // word-side now contributes for CJK (it returned 0 under unicode61).
-            match build_fts_match(&es.query) {
-                Some(expr) => {
-                    let fconn = open(&db).unwrap();
-                    let fts = fts_ranked_ids(&fconn, &expr, limit.max(10)).unwrap_or_default();
-                    eprintln!(
-                        "[corpus C] {} FTS-only(trigram) expr={expr} -> {} candidate(s) ids={fts:?}",
-                        c.id, fts.len()
-                    );
-                }
-                None => eprintln!(
-                    "[corpus C] {} FTS-only(trigram): build_fts_match = None (no >=3-char term; vector-only)",
-                    c.id
-                ),
-            }
-            // Real hybrid search at the DEFAULT production timeout (8s).
-            let hits = block_on(search(&db, Some(emb), &es.query, limit)).expect("search");
+    let mut dist_rows: Vec<(String, f64)> = Vec::new(); // (relation, distance)
 
-            // Always dump top-K for visibility.
-            let mut topk = String::new();
-            for (i, h) in hits.iter().enumerate() {
-                topk.push_str(&format!(
-                    "\n      #{i} id={} summary={}\n          snippet={}",
-                    h.id, h.summary, h.snippet
-                ));
-            }
-            eprintln!("[corpus C] {} query={:?} -> {} hits:{}", c.id, es.query, hits.len(), if topk.is_empty() { " <none>".into() } else { topk });
+    for (gname, gcases) in &groups {
+        let agent = gcases[0].gt.agent_id.clone();
+        let tmp = tempfile::tempdir().unwrap();
+        let scan_root = tmp.path().join("agents").join(&agent).join("team_sessions");
+        for c in gcases.iter() {
+            stage_rollout(&scan_root, c);
+        }
+        let db = tmp.path().join("memory.db");
+        let conn = open(&db).unwrap();
+        let ing = ingest_once(&conn, &scan_root, &agent).unwrap();
+        let now_ms = current_time_ms() + DISTILL_IDLE_MS + 60_000;
+        let dstats = block_on(distill_once(&conn, &extractor, now_ms)).expect("distill_once");
+        let estats = block_on(embed_pending_once(&conn, &embedder)).expect("embed_pending_once");
+        eprintln!(
+            "[corpus C] === group '{gname}' ({} cases) ingest={} distilled={} embedded={} ===",
+            gcases.len(), ing.events_inserted, dstats.points_written, estats.rows_embedded
+        );
 
-            let mut why: Vec<String> = Vec::new();
-            match hits.first() {
-                None => why.push("no hits returned".into()),
-                Some(top1) => {
-                    if !es.expected_top1_summary_must_match_any.is_empty()
-                        && !any_ci(&top1.summary, &es.expected_top1_summary_must_match_any)
-                    {
-                        why.push(format!(
-                            "top1 summary {:?} matches none of {:?}",
-                            top1.summary, es.expected_top1_summary_must_match_any
-                        ));
+        // ---- (a) expected_search within this group's DB ----
+        for c in gcases.iter() {
+            for es in &c.gt.expected_search {
+                search_count += 1;
+                let limit = if es.limit == 0 { 3 } else { es.limit as usize };
+                let t0 = std::time::Instant::now();
+                let qemb = block_on(emb.embed(&[es.query.clone()]));
+                let embed_secs = t0.elapsed().as_secs_f64();
+                let qdim = qemb.as_ref().ok().and_then(|v| v.first()).map(|v| v.len()).unwrap_or(0);
+                eprintln!("[corpus C] {} query-embed wall={:.2}s dim={} query={:?}", c.id, embed_secs, qdim, es.query);
+                match build_fts_match(&es.query) {
+                    Some(expr) => {
+                        let fts = fts_ranked_ids(&conn, &expr, limit.max(10)).unwrap_or_default();
+                        eprintln!("[corpus C] {} FTS-only(trigram) expr={expr} -> {} ids={fts:?}", c.id, fts.len());
                     }
-                    if !es.expected_top1_summary_must_not_match.is_empty()
-                        && any_ci(&top1.summary, &es.expected_top1_summary_must_not_match)
-                    {
-                        why.push(format!(
-                            "top1 summary {:?} wrongly matched a must_not term {:?}",
-                            top1.summary, es.expected_top1_summary_must_not_match
-                        ));
+                    None => eprintln!("[corpus C] {} FTS-only(trigram): None", c.id),
+                }
+                let hits = block_on(search(&db, Some(emb), &es.query, limit)).expect("search");
+                let mut topk = String::new();
+                for (i, h) in hits.iter().enumerate() {
+                    topk.push_str(&format!("\n      #{i} id={} {}", h.id, h.summary));
+                }
+                eprintln!("[corpus C] {} query={:?} -> {} hits:{}", c.id, es.query, hits.len(), if topk.is_empty() { " <none>".into() } else { topk });
+                let mut why: Vec<String> = Vec::new();
+                match hits.first() {
+                    None => why.push("no hits".into()),
+                    Some(t1) => {
+                        if !es.expected_top1_summary_must_match_any.is_empty()
+                            && !any_ci(&t1.summary, &es.expected_top1_summary_must_match_any) {
+                            why.push(format!("top1 {:?} matches none of {:?}", t1.summary, es.expected_top1_summary_must_match_any));
+                        }
+                        if !es.expected_top1_summary_must_not_match.is_empty()
+                            && any_ci(&t1.summary, &es.expected_top1_summary_must_not_match) {
+                            why.push(format!("top1 {:?} hit must_not {:?}", t1.summary, es.expected_top1_summary_must_not_match));
+                        }
                     }
                 }
-            }
-            // Membership: each member-set must be matched by SOME hit in the
-            // top-K (different hits allowed). Used where top1 is ambiguous
-            // (e.g. a contradiction pair both answering the same query).
-            for member_set in &es.expected_topk_members {
-                if !hits.iter().any(|h| any_ci(&h.summary, member_set)) {
-                    why.push(format!(
-                        "top-{limit} has no hit matching member-set {member_set:?}"
-                    ));
+                for ms in &es.expected_topk_members {
+                    if !hits.iter().any(|h| any_ci(&h.summary, ms)) {
+                        why.push(format!("top-{limit} missing member-set {ms:?}"));
+                    }
+                }
+                if !why.is_empty() {
+                    failures.push(format!("[{}] query={:?}: {}", c.id, es.query, why.join("; ")));
                 }
             }
-            if !why.is_empty() {
-                failures.push(format!("[{}] query={:?}: {}", c.id, es.query, why.join("; ")));
+        }
+
+        // ---- (b) relation-pair bge-m3 distances (distribution for S5 threshold T) ----
+        let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+        for c in gcases.iter() {
+            let a_tokens = c.gt.expected_distill_case_level.first().cloned().unwrap_or_default();
+            for r in &c.gt.consolidation_relations {
+                let key = if c.id < r.with_case {
+                    (c.id.clone(), r.with_case.clone())
+                } else {
+                    (r.with_case.clone(), c.id.clone())
+                };
+                if !seen.insert(key) {
+                    continue;
+                }
+                let Some(b) = by_id.get(&r.with_case) else { continue };
+                let b_tokens = b.gt.expected_distill_case_level.first().cloned().unwrap_or_default();
+                if a_tokens.is_empty() || b_tokens.is_empty() {
+                    continue;
+                }
+                match (find_distilled_id(&conn, &a_tokens), find_distilled_id(&conn, &b_tokens)) {
+                    (Some(ida), Some(idb)) => {
+                        if let Some(d) = kp_distance(&conn, emb, ida, idb) {
+                            eprintln!(
+                                "[dist] {gname} {}<->{} relation={} L2={:.4}\n         {}: {:?}\n         {}: {:?}",
+                                c.id, r.with_case, r.relation, d,
+                                c.id, summary_of(&conn, ida), r.with_case, summary_of(&conn, idb)
+                            );
+                            dist_rows.push((r.relation.clone(), d));
+                        }
+                    }
+                    _ => eprintln!("[dist] {gname} {}<->{} relation={}: KP(s) not located, skip", c.id, r.with_case, r.relation),
+                }
             }
         }
     }
 
-    if !failures.is_empty() {
-        panic!(
-            "Layer C: {}/{} searches FAILED (see top-K dumps above):\n  {}",
-            failures.len(),
-            search_count,
-            failures.join("\n  ")
-        );
+    eprintln!("[corpus C] ==== bge-m3 KP-distance distribution (S5 threshold T input) ====");
+    let mut by_rel: std::collections::BTreeMap<String, Vec<f64>> = std::collections::BTreeMap::new();
+    for (rel, d) in &dist_rows {
+        by_rel.entry(rel.clone()).or_default().push(*d);
     }
-    eprintln!("[corpus C] all {search_count} search assertions PASS");
+    for (rel, ds) in &by_rel {
+        let min = ds.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max = ds.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let avg = ds.iter().sum::<f64>() / ds.len() as f64;
+        eprintln!("[corpus C]   relation={rel:14} n={} min={min:.4} avg={avg:.4} max={max:.4}", ds.len());
+    }
+
+    if !failures.is_empty() {
+        panic!("Layer C: {}/{} searches FAILED:\n  {}", failures.len(), search_count, failures.join("\n  "));
+    }
+    eprintln!("[corpus C] all {search_count} search assertions PASS across {} groups", groups.len());
 }

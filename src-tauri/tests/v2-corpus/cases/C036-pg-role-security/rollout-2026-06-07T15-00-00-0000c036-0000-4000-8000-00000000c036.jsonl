@@ -1,0 +1,10 @@
+{"timestamp": "2026-06-07T15:00:00.001Z", "type": "session_meta", "payload": {"id": "00000000-0000-4000-8000-000000000000", "cwd": "/Users/USER/code/acme-api", "originator": "codex_cli", "cli_version": "0.0.0", "instructions": "<base instructions omitted for fixture>"}}
+{"timestamp": "2026-06-07T15:00:00.002Z", "type": "event_msg", "payload": {"type": "task_started", "model_context_window": 200000}}
+{"timestamp": "2026-06-07T15:00:00.003Z", "type": "response_item", "payload": {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "You are operating in a sandboxed workspace. Tools available: edit, write, exec_command. Respect the approval policy and never touch files outside the workspace root. <skills>memory_search, memory_get</skills>"}]}}
+{"timestamp": "2026-06-07T15:00:00.004Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "应用连 Postgres 用哪个角色?权限怎么分?"}]}}
+{"timestamp": "2026-06-07T15:00:00.005Z", "type": "turn_context", "payload": {"model": "acme-model-1", "sandbox_policy": "workspace-write", "approval_policy": "on-request"}}
+{"timestamp": "2026-06-07T15:00:00.006Z", "type": "event_msg", "payload": {"type": "user_message", "message": "应用连 Postgres 用哪个角色?权限怎么分?"}}
+{"timestamp": "2026-06-07T15:00:00.007Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "约定:应用运行时用 app_rw 角色,只授 DML(SELECT/INSERT/UPDATE/DELETE),不给 DDL;所有 schema 变更(DDL)只能走迁移专用账号 migrator 执行。这样即使应用被攻破或代码出 bug,也改不了表结构、删不了表——把 schema 破坏面隔离在迁移流程里。"}]}}
+{"timestamp": "2026-06-07T15:00:00.008Z", "type": "event_msg", "payload": {"type": "agent_message", "message": "约定:应用运行时用 app_rw 角色,只授 DML(SELECT/INSERT/UPDATE/DELETE),不给 DDL;所有 schema 变更(DDL)只能走迁移专用账号 migrator 执行。这样即使应用被攻破或代码出 bug,也改不了表结构、删不了表——把 schema 破坏面隔离在迁移流程里。"}}
+{"timestamp": "2026-06-07T15:00:00.009Z", "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"total_tokens": 1234}}}}
+{"timestamp": "2026-06-07T15:00:00.010Z", "type": "event_msg", "payload": {"type": "task_complete", "last_agent_message": ""}}
