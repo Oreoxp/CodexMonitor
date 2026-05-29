@@ -2406,7 +2406,7 @@ pub async fn run_distill_loop(
 /// Schema version this binary writes. The DB file records its current
 /// schema in `PRAGMA user_version`; `migrate` advances it one step at a
 /// time up to this value.
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 /// Bring `conn`'s schema up to [`SCHEMA_VERSION`].
 ///
@@ -2551,6 +2551,27 @@ fn apply_migration_step(tx: &rusqlite::Transaction<'_>, target: i64) -> Result<(
              CREATE VIRTUAL TABLE log_vec USING vec0(embedding float[1024]);
              PRAGMA user_version = 6;",
         )?,
+        7 => tx.execute_batch(
+            // v7: rebuild log_fts with the FTS5 `trigram` tokenizer so CJK
+            // substrings become lexically matchable (the default unicode61
+            // doesn't segment CJK → Chinese queries got 0 FTS hits and the
+            // lexical half of hybrid search was dead for Chinese). Same
+            // external-content config (content='log', content_rowid='id',
+            // column `detail`); ONLY the tokenizer changes. The sync triggers
+            // (log_ai/ad/au) reference log_fts by name and keep working after
+            // the recreate — sync logic untouched. DROP+CREATE of an FTS5 table
+            // runs inside this IMMEDIATE tx just like the v6 log_vec rebuild;
+            // `'rebuild'` re-indexes every existing row from the content table.
+            "DROP TABLE IF EXISTS log_fts;
+             CREATE VIRTUAL TABLE log_fts USING fts5(
+                 detail,
+                 content='log',
+                 content_rowid='id',
+                 tokenize='trigram'
+             );
+             INSERT INTO log_fts(log_fts) VALUES('rebuild');
+             PRAGMA user_version = 7;",
+        )?,
         _ => unreachable!("no migration step defined for v{target} — add an arm"),
     }
     Ok(())
@@ -2563,23 +2584,74 @@ fn current_time_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// Turn a free-text query into an FTS5 MATCH expression. Each whitespace
-/// token is wrapped in a double-quoted string literal (so FTS5 query
-/// operators inside the token are treated as content, not syntax — the only
-/// in-literal escape is `"` → `""`), and tokens are OR-joined so the search
-/// is recall-oriented with bm25 surfacing the best matches. Tokens with no
-/// alphanumeric character are dropped; a query that yields none returns
-/// `None` (the caller treats that as "no results").
+/// FTS5 `trigram` tokenizer (set in the v7 migration) indexes/matches only
+/// substrings of **>= 3 chars**. Terms shorter than this are unmatchable and
+/// are dropped — those queries fall back to the vector path.
+const FTS_TRIGRAM_MIN: usize = 3;
+
+/// Non-overlapping width used to slice a long CJK run into bounded substring
+/// terms. Deliberately NOT a per-character sliding 3-gram sweep: a 4-char
+/// chunk like `会话状态` is specific, whereas OR-ing every sliding 3-gram
+/// (`会话状`,`话状态`,`状态用`,…) would recall any row sharing a common 3-gram
+/// and flood RRF with noise.
+const FTS_CJK_CHUNK: usize = 4;
+
+/// CJK Unified Ideographs (incl. Ext-A) — enough to detect Chinese runs in a
+/// query; non-CJK alphanumerics (latin / digits) are matched whole.
+fn is_cjk(c: char) -> bool {
+    matches!(c, '\u{3400}'..='\u{9FFF}')
+}
+
+fn push_fts_term(terms: &mut Vec<String>, seen: &mut std::collections::HashSet<String>, raw: &str) {
+    if !raw.is_empty() && seen.insert(raw.to_string()) {
+        // Quote as an FTS5 string literal so query operators inside the term
+        // are content, not syntax; the only in-literal escape is `"` → `""`.
+        terms.push(format!("\"{}\"", raw.replace('"', "\"\"")));
+    }
+}
+
+/// Turn a free-text query into an FTS5 `trigram` MATCH expression.
+///
+/// The index is trigram (substring match, >= 3 chars — see [`FTS_TRIGRAM_MIN`]),
+/// so:
+///   * non-CJK runs (English words >= 3 chars) are kept whole and substring-
+///     match (e.g. `test` matches `testing`);
+///   * CJK runs are sliced into NON-overlapping [`FTS_CJK_CHUNK`]-char blocks
+///     (bounded segmentation, not a sliding 3-gram sweep) so each block is a
+///     specific substring term;
+///   * runs/blocks shorter than [`FTS_TRIGRAM_MIN`] are dropped (the vector
+///     path is the backstop for 1–2 char CJK queries like `缓存`).
+///
+/// Blocks are split on any non-alphanumeric char (punctuation / whitespace; CJK
+/// ideographs are alphanumeric, so a CJK run stays one block), then `"`-escaped,
+/// quoted, de-duplicated, and OR-joined for recall (bm25 surfaces the best). A
+/// query that yields no matchable term returns `None` (caller: "no FTS results").
 fn build_fts_match(query: &str) -> Option<String> {
-    let tokens: Vec<String> = query
-        .split_whitespace()
-        .filter(|token| token.chars().any(|c| c.is_alphanumeric()))
-        .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
-        .collect();
-    if tokens.is_empty() {
+    let mut terms: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for block in query.split(|c: char| !c.is_alphanumeric()) {
+        let chars: Vec<char> = block.chars().collect();
+        if chars.len() < FTS_TRIGRAM_MIN {
+            continue;
+        }
+        if chars.iter().any(|&c| is_cjk(c)) {
+            let mut i = 0;
+            while i < chars.len() {
+                let end = (i + FTS_CJK_CHUNK).min(chars.len());
+                if end - i >= FTS_TRIGRAM_MIN {
+                    let piece: String = chars[i..end].iter().collect();
+                    push_fts_term(&mut terms, &mut seen, &piece);
+                }
+                i += FTS_CJK_CHUNK;
+            }
+        } else {
+            push_fts_term(&mut terms, &mut seen, block);
+        }
+    }
+    if terms.is_empty() {
         None
     } else {
-        Some(tokens.join(" OR "))
+        Some(terms.join(" OR "))
     }
 }
 
@@ -4432,7 +4504,10 @@ mod tests {
     // IMMEDIATE migration tx, and the rebuilt table is functional.
     #[test]
     fn s4schema_d1_v6_redimensions_log_vec_to_1024() {
-        assert_eq!(SCHEMA_VERSION, 6, "this test pins the v6 target");
+        // Pins the s4 log_vec (1024-dim) schema at the *current* SCHEMA_VERSION
+        // — not a literal version number (those rot on every bump; the real
+        // invariant is read_user_version == SCHEMA_VERSION, asserted after
+        // migrate below). v7 only touches log_fts, so log_vec stays 1024 here.
         // vec0 is registered process-globally inside backend::open(); this test
         // lays a frozen v5 schema (which has a vec0 table) via a RAW Connection
         // before any open(), so register the module explicitly to avoid a
@@ -4485,6 +4560,206 @@ mod tests {
             assert_eq!(read_user_version(&conn), SCHEMA_VERSION);
             assert!(log_vec_ddl(&conn).contains("float[1024]"), "v0→v6 chain log_vec dim");
         }
+    }
+
+    // ---- S5schema (v7) — log_fts re-tokenized to FTS5 `trigram` (CJK lexical) ----
+
+    // Cumulative v6 schema snapshot: v5 shape but log_vec at float[1024], and
+    // log_fts still on the DEFAULT (unicode61) tokenizer (trigram arrives in v7).
+    const V6_DDL_FROZEN: &str = "CREATE TABLE log (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts           INTEGER NOT NULL,
+        summary      TEXT    NOT NULL,
+        detail       TEXT,
+        origin       TEXT    NOT NULL DEFAULT 'self',
+        project_hash TEXT,
+        kind         TEXT
+    );
+    CREATE VIRTUAL TABLE log_fts USING fts5(detail, content='log', content_rowid='id');
+    CREATE TRIGGER log_ai AFTER INSERT ON log BEGIN
+        INSERT INTO log_fts(rowid, detail) VALUES (new.id, new.detail);
+    END;
+    CREATE TRIGGER log_ad AFTER DELETE ON log BEGIN
+        INSERT INTO log_fts(log_fts, rowid, detail) VALUES('delete', old.id, old.detail);
+    END;
+    CREATE TRIGGER log_au AFTER UPDATE ON log BEGIN
+        INSERT INTO log_fts(log_fts, rowid, detail) VALUES('delete', old.id, old.detail);
+        INSERT INTO log_fts(rowid, detail) VALUES (new.id, new.detail);
+    END;
+    CREATE INDEX idx_log_ts ON log(ts);
+    CREATE TABLE raw_thread (
+        thread_id        TEXT PRIMARY KEY,
+        agent_id         TEXT,
+        team_id          TEXT,
+        project_hash     TEXT,
+        source           TEXT,
+        parent_thread_id TEXT,
+        cwd              TEXT,
+        source_path      TEXT NOT NULL,
+        first_seen_ts    INTEGER NOT NULL,
+        last_ingest_ts   INTEGER NOT NULL,
+        last_offset      INTEGER NOT NULL DEFAULT 0,
+        last_line_no     INTEGER NOT NULL DEFAULT 0,
+        last_distilled_line_no INTEGER NOT NULL DEFAULT 0,
+        last_growth_ts   INTEGER
+    );
+    CREATE TABLE raw_event (
+        id          INTEGER PRIMARY KEY,
+        thread_id   TEXT NOT NULL REFERENCES raw_thread(thread_id),
+        line_no     INTEGER NOT NULL,
+        payload     TEXT NOT NULL,
+        ingested_at INTEGER NOT NULL,
+        UNIQUE(thread_id, line_no)
+    );
+    CREATE INDEX idx_raw_event_thread ON raw_event(thread_id);
+    CREATE VIRTUAL TABLE log_vec USING vec0(embedding float[1024]);";
+
+    fn log_fts_ddl(conn: &Connection) -> String {
+        conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='log_fts'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    // T1 — v6→v7: log_fts re-tokenized to trigram, and pre-existing rows are
+    // re-searchable (the 'rebuild' actually repopulated the new index).
+    #[test]
+    fn v6_to_v7_migrate() {
+        let (_tmp, db) = db_path();
+        ensure_vec_extension(); // V6_DDL_FROZEN has a vec0 table (raw open)
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        {
+            let conn = Connection::open(&db).unwrap();
+            let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0)).unwrap();
+            conn.execute_batch(V6_DDL_FROZEN).unwrap();
+            conn.execute_batch("PRAGMA user_version = 6;").unwrap();
+            // Seed rows under the OLD unicode61 log_fts (one zh, one en).
+            conn.execute(
+                "INSERT INTO log(ts, summary, detail, origin) VALUES (1, 's1', ?1, 'self')",
+                params!["我们的会话状态最终选 Postgres 存储方案"],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO log(ts, summary, detail, origin) VALUES (2, 's2', ?1, 'self')",
+                params!["an english oauth note about tokens"],
+            )
+            .unwrap();
+            assert!(!log_fts_ddl(&conn).contains("trigram"), "v6 precondition: unicode61");
+            assert_eq!(read_user_version(&conn), 6);
+        }
+        let conn = open(&db).unwrap();
+        assert_eq!(read_user_version(&conn), SCHEMA_VERSION);
+        assert!(log_fts_ddl(&conn).contains("trigram"), "post-v7 log_fts must be trigram");
+        // Rebuild evidence: the pre-existing English row is FTS-retrievable.
+        let en = fts_ranked_ids(&conn, &build_fts_match("oauth").unwrap(), 50).unwrap();
+        assert!(!en.is_empty(), "rebuild must re-index pre-existing rows; en hits = {en:?}");
+        // And the Chinese row is now CJK-substring searchable (0 under unicode61).
+        let zh = fts_ranked_ids(&conn, &build_fts_match("会话状态用什么存").unwrap(), 50).unwrap();
+        eprintln!("[T1] post-v7 zh FTS hits = {zh:?} (Chinese row recalled via detail 子串)");
+        assert!(!zh.is_empty(), "trigram + rebuild: Chinese detail must be FTS-recallable");
+    }
+
+    // T2 — v0 → … → v7 full chain ends at v7 with all core products + trigram + 1024.
+    #[test]
+    fn v0_to_v7_full_chain() {
+        let (_tmp, db) = db_path();
+        build_v0_db(&db);
+        let conn = open(&db).unwrap();
+        // read_user_version == SCHEMA_VERSION is the invariant (currently 7).
+        assert_eq!(read_user_version(&conn), SCHEMA_VERSION);
+        assert!(schema_object_exists(&conn, "table", "raw_event"));
+        assert!(schema_object_exists(&conn, "table", "raw_thread"));
+        assert!(schema_object_exists(&conn, "table", "log_vec"));
+        assert!(log_fts_ddl(&conn).contains("trigram"), "v0→v7 chain: log_fts trigram");
+        assert!(log_vec_ddl(&conn).contains("float[1024]"), "v0→v7 chain: log_vec 1024");
+    }
+
+    // T3 — re-open a v7 DB: migrate is a no-op, log_fts stays trigram, version stable.
+    #[test]
+    fn v7_migrate_idempotent() {
+        let (_tmp, db) = db_path();
+        for _ in 0..3 {
+            let conn = open(&db).unwrap();
+            assert_eq!(read_user_version(&conn), SCHEMA_VERSION);
+            assert!(log_fts_ddl(&conn).contains("trigram"), "log_fts stays trigram across reopens");
+        }
+    }
+
+    // T4 — Design B gate: build_fts_match makes a CJK query lexically matchable
+    // via DETAIL substrings (summary is NOT FTS-indexed), AND bounded
+    // segmentation does not over-recall.
+    #[test]
+    fn fts_match_cjk_substring() {
+        let (_tmp, db) = db_path();
+        // NOTE: log_fts indexes only `detail` → the Chinese to be matched MUST
+        // live in `detail` (summary中文 is invisible to FTS).
+        let target = log_progress(
+            &db,
+            "会话存储选型",
+            Some("我们的会话状态要持久化，最终选 Postgres 存储"),
+        )
+        .unwrap();
+        // Precision noise #1 (semantic neighbor, no query chunk): 状态机, not 会话状态.
+        let noise_word = log_progress(
+            &db,
+            "状态机",
+            Some("状态机设计采用事件驱动模式"),
+        )
+        .unwrap();
+        // Precision noise #2 (THE Design-B discriminator): contains the query
+        // 3-gram "状态用" but NOT the bounded chunk "会话状态"/"用什么存". A brute
+        // per-char 3-gram sweep WOULD recall this; bounded segmentation must NOT.
+        let noise_trigram = log_progress(
+            &db,
+            "监控看板",
+            Some("性能状态用量监控看板，与本主题无关"),
+        )
+        .unwrap();
+
+        let conn = open(&db).unwrap();
+        let expr = build_fts_match("会话状态用什么存").expect("CJK query → MATCH expr");
+        eprintln!("[T4] build_fts_match(\"会话状态用什么存\") = {expr}");
+        let hits = fts_ranked_ids(&conn, &expr, 50).unwrap();
+        eprintln!(
+            "[T4] FTS hits = {hits:?}  (target={target}, noise_word={noise_word}, noise_trigram={noise_trigram})"
+        );
+        assert!(hits.contains(&target), "RECALL: target row matched via detail 中文子串");
+        assert!(!hits.contains(&noise_word), "PRECISION: 状态机设计 row must NOT match");
+        assert!(
+            !hits.contains(&noise_trigram),
+            "PRECISION (Design-B gate): row sharing only the 3-gram 状态用 must NOT match — bounded segmentation, not a per-char 3-gram sweep"
+        );
+    }
+
+    // T5 — English under trigram becomes SUBSTRING matching (behavior change
+    // from unicode61 word-matching; recorded intentionally).
+    #[test]
+    fn fts_match_english_substring() {
+        let (_tmp, db) = db_path();
+        let a = log_progress(&db, "a", Some("we are testing the parser")).unwrap(); // testing ⊃ test
+        let b = log_progress(&db, "b", Some("won the contest yesterday")).unwrap(); // contest ⊃ test
+        let c = log_progress(&db, "c", Some("completely unrelated body")).unwrap(); // no "test"
+        let conn = open(&db).unwrap();
+        let expr = build_fts_match("test").expect("english query");
+        eprintln!("[T5] build_fts_match(\"test\") = {expr}");
+        let hits = fts_ranked_ids(&conn, &expr, 50).unwrap();
+        eprintln!("[T5] FTS hits = {hits:?}  (testing={a}, contest={b}, unrelated={c})");
+        assert!(hits.contains(&a) && hits.contains(&b), "trigram: 'test' substring-matches testing & contest");
+        assert!(!hits.contains(&c), "unrelated row not matched");
+    }
+
+    // T6 — observe (not a pass/fail gate): trigram's >=3-char floor means a
+    // 2-char CJK query is unmatchable → no FTS term → vector path is the backstop.
+    #[test]
+    fn fts_match_short_cjk_observe() {
+        let two = build_fts_match("缓存");
+        eprintln!("[T6] build_fts_match(\"缓存\") = {two:?}  (None ⇒ no FTS term; vector backstop)");
+        assert!(two.is_none(), "2-char CJK query has no trigram-matchable term (>=3 floor)");
+        let three = build_fts_match("缓存层");
+        eprintln!("[T6] build_fts_match(\"缓存层\") = {three:?}  (3 chars ⇒ matchable)");
+        assert!(three.is_some(), "3-char CJK query is trigram-matchable");
     }
 
     // S3s.C.1 — first ingest with new rows sets `last_growth_ts` to the

@@ -595,6 +595,22 @@ fn corpus_layer_c_search() {
                 "[corpus C] {} query-embed wall={:.2}s dim={} (budget {:?}) query={:?}",
                 c.id, embed_secs, qdim, QUERY_EMBED_TIMEOUT, es.query
             );
+            // Observe the lexical (FTS/trigram) half in ISOLATION — proves the
+            // word-side now contributes for CJK (it returned 0 under unicode61).
+            match build_fts_match(&es.query) {
+                Some(expr) => {
+                    let fconn = open(&db).unwrap();
+                    let fts = fts_ranked_ids(&fconn, &expr, limit.max(10)).unwrap_or_default();
+                    eprintln!(
+                        "[corpus C] {} FTS-only(trigram) expr={expr} -> {} candidate(s) ids={fts:?}",
+                        c.id, fts.len()
+                    );
+                }
+                None => eprintln!(
+                    "[corpus C] {} FTS-only(trigram): build_fts_match = None (no >=3-char term; vector-only)",
+                    c.id
+                ),
+            }
             // Real hybrid search at the DEFAULT production timeout (8s).
             let hits = block_on(search(&db, Some(emb), &es.query, limit)).expect("search");
 
