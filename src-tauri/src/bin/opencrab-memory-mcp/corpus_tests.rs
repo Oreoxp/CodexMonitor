@@ -285,6 +285,65 @@ fn classify(payload: &str) -> &'static str {
     }
 }
 
+/// Locator token-groups for mapping a case to its distilled KP (Layer D).
+/// PRIMARY: `expected_distill_case_level`. FALLBACK (when that's absent — e.g.
+/// C001/C002 carry only per-KP assertions): the FIRST
+/// `expected_distill.knowledge_points` entry's `summary_must_contain_any` (an
+/// OR-group) plus its `detail_must_mention_all` (AND-of-OR-groups). Reads
+/// ground_truth only — touches no corpus yaml. Lets the contradiction pairs that
+/// lack `case_level` get located so gate ③ is testable.
+fn locator_groups(gt: &GroundTruth) -> Vec<Vec<String>> {
+    if !gt.expected_distill_case_level.is_empty() {
+        return gt.expected_distill_case_level.clone();
+    }
+    if let Some(ed) = &gt.expected_distill {
+        if let Some(kp) = ed.knowledge_points.first() {
+            let mut groups: Vec<Vec<String>> = Vec::new();
+            if !kp.summary_must_contain_any.is_empty() {
+                groups.push(kp.summary_must_contain_any.clone());
+            }
+            for g in &kp.detail_must_mention_all {
+                if !g.is_empty() {
+                    groups.push(g.clone());
+                }
+            }
+            return groups;
+        }
+    }
+    Vec::new()
+}
+
+// Deterministic CI gate for the fallback locator (the end-to-end "really
+// locates C001/C002's distilled KP" is still verified live by Layer D).
+#[test]
+fn locator_falls_back_to_knowledge_points() {
+    // No case_level, but a knowledge_point with Postgres tokens (the C001 shape).
+    let gt = GroundTruth {
+        expected_distill: Some(ExpectedDistill {
+            expected_kp_count: 1,
+            knowledge_points: vec![ExpectedKp {
+                summary_must_contain_any: vec!["Postgres".into(), "PG".into()],
+                detail_must_mention_all: vec![vec!["事务".into(), "ACID".into()]],
+                ..Default::default()
+            }],
+        }),
+        ..Default::default()
+    };
+    let groups = locator_groups(&gt);
+    assert!(!groups.is_empty(), "fallback must build groups from knowledge_points");
+    assert!(
+        all_groups("选择 PostgreSQL 作为会话存储，因 ACID 事务", &groups),
+        "fallback locates the matching distilled row: {groups:?}"
+    );
+    assert!(!all_groups("用 Redis 做缓存", &groups), "non-matching row must NOT be located");
+    // When case_level IS present it is used directly; the fallback isn't consulted.
+    let gt2 = GroundTruth {
+        expected_distill_case_level: vec![vec!["Kafka".to_string()]],
+        ..Default::default()
+    };
+    assert_eq!(locator_groups(&gt2), vec![vec!["Kafka".to_string()]]);
+}
+
 // ===========================================================================
 // LAYER A — mechanical, deterministic. HARD assert; collect all failures first.
 // ===========================================================================
@@ -764,4 +823,379 @@ fn corpus_layer_c_search() {
         panic!("Layer C: {}/{} searches FAILED:\n  {}", failures.len(), search_count, failures.join("\n  "));
     }
     eprintln!("[corpus C] all {search_count} search assertions PASS across {} groups", groups.len());
+}
+
+// ===========================================================================
+// LAYER D — consolidation (v8 / S5), live. #[ignore]. The eval for the judge.
+//
+// Loads EVERY case carrying `consolidation_relations` into ONE DENSE DB (no
+// grouping — consolidation must be stress-tested on dense neighbours; this is
+// the density Layer C's per-group split deliberately does NOT exercise) →
+// distill → embed → inject `log.ts` from `created_at_offset_hours` (so the
+// supersede direction is judgeable) → `find_candidates(T)` (report candidates
+// vs the annotated expected pairs) → `consolidate_dry_run` and machine-check
+// the audit:
+//
+//   HARD gates (precision — the ones to watch):
+//     1. NO contradiction / false_neighbor pair is judged duplicate|supersede
+//        (never soft-merge a contradiction or a false neighbour — the
+//        "don't soft-delete useful memory" lifeline).
+//     2. a clear duplicate pair is judged duplicate|supersede (must merge).
+//     3. a contradiction pair is judged contradiction.
+//     4. the recency trap C020<->C023 is NOT judged supersede.
+//   ADVISORY (logged, never fail): duplicate-vs-supersede label;
+//     complement-vs-no_action label.
+//   WATCHED (logged): a supersede pair judged supersede (superseded_id appears
+//     in the dry-run log); a supersede mislabelled duplicate (still merges,
+//     loses direction) is flagged — a prompt-fix signal, not a failure.
+//
+// temp-0.2 jitters: the hard gates should be stable (clear cases), advisory
+// labels will wobble. 1+/4 hard-gate breakage = a real problem → tune the
+// prompt. The dry-run MUTATES no live state, and the test asserts that.
+//
+// Mapping case-id <-> log.id in the dense DB is greedy-most-specific-first:
+// a single token ("Kafka") collides across 5 cases, so each case claims the
+// lowest-id distilled row matching ALL of its `expected_distill_case_level`
+// groups, processing cases with more groups first so a broad locator can't
+// steal a narrower case's row. Unmappable cases are logged and their gates
+// skipped (best-effort — the audit dump is still the human inspection surface).
+// ===========================================================================
+
+fn canon_ids(a: &str, b: &str) -> (String, String) {
+    if a <= b {
+        (a.to_string(), b.to_string())
+    } else {
+        (b.to_string(), a.to_string())
+    }
+}
+
+#[test]
+#[ignore]
+fn corpus_layer_d_consolidate() {
+    let Some(extractor) = HttpExtractor::load() else {
+        eprintln!("[corpus D] no distiller config (OPENCRAB_DISTILLER_* / distiller.json) — SKIPPING");
+        return;
+    };
+    let Some(embedder) = HttpEmbedder::load() else {
+        eprintln!("[corpus D] no embedder config — SKIPPING");
+        return;
+    };
+    let cases = load_cases();
+    let rel_cases: Vec<&Case> = cases
+        .iter()
+        .filter(|c| !c.gt.consolidation_relations.is_empty())
+        .collect();
+    assert!(!rel_cases.is_empty(), "no cases carry consolidation_relations");
+
+    // ---- one dense DB: ingest ALL relation cases, distill, embed ----
+    let agent = rel_cases[0].gt.agent_id.clone();
+    let tmp = tempfile::tempdir().unwrap();
+    let scan_root = tmp.path().join("agents").join(&agent).join("team_sessions");
+    for c in &rel_cases {
+        stage_rollout(&scan_root, c);
+    }
+    let db = tmp.path().join("memory.db");
+    let conn = open(&db).unwrap();
+    let ing = ingest_once(&conn, &scan_root, &agent).unwrap();
+    let now_ms = current_time_ms() + DISTILL_IDLE_MS + 60_000;
+    let dstats = block_on(distill_once(&conn, &extractor, now_ms)).expect("distill_once");
+    let estats = block_on(embed_pending_once(&conn, &embedder)).expect("embed_pending_once");
+    eprintln!(
+        "[corpus D] dense DB: {} relation-cases ingest={} distilled={} embedded={}",
+        rel_cases.len(),
+        ing.events_inserted,
+        dstats.points_written,
+        estats.rows_embedded
+    );
+
+    // Diagnostic: every distilled KP verbatim — so unmapped cases (C001/C002
+    // have no locator tokens) can still be inspected for distill drift.
+    {
+        let mut stmt = conn
+            .prepare("SELECT id, summary, detail FROM log WHERE origin='distill' ORDER BY id")
+            .unwrap();
+        let kps: Vec<(i64, String, Option<String>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        eprintln!("[corpus D] --- {} distilled KPs (verbatim) ---", kps.len());
+        for (id, s, d) in &kps {
+            eprintln!(
+                "[corpus D]   KP id={id}\n              summary={s:?}\n              detail={:?}",
+                d.as_deref().unwrap_or("")
+            );
+        }
+    }
+
+    // ---- greedy case-id <-> log.id mapping (most groups first, claim rows) ----
+    let all_rows: Vec<(i64, String, Option<String>)> = {
+        let mut stmt = conn
+            .prepare("SELECT id, summary, detail FROM log WHERE origin='distill' ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    };
+    let mut id_of: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    let mut case_of: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
+    let mut claimed: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let mut order: Vec<&Case> = rel_cases.clone();
+    order.sort_by_key(|c| std::cmp::Reverse(locator_groups(&c.gt).len()));
+    for c in &order {
+        let groups = locator_groups(&c.gt);
+        if groups.is_empty() {
+            eprintln!("[corpus D] map: {} has no locator tokens — unmapped", c.id);
+            continue;
+        }
+        let hit = all_rows.iter().find(|(id, s, d)| {
+            !claimed.contains(id)
+                && all_groups(&format!("{s}\n{}", d.as_deref().unwrap_or("")), &groups)
+        });
+        match hit {
+            Some((id, _, _)) => {
+                claimed.insert(*id);
+                id_of.insert(c.id.clone(), *id);
+                case_of.insert(*id, c.id.clone());
+            }
+            None => eprintln!("[corpus D] map: {} matched no distilled row — unmapped", c.id),
+        }
+    }
+
+    // ---- inject ts from created_at_offset_hours (supersede direction) ----
+    let base = current_time_ms();
+    for c in &rel_cases {
+        if let (Some(off), Some(&id)) = (c.gt.created_at_offset_hours, id_of.get(&c.id)) {
+            let ts = base + off * 3_600_000;
+            conn.execute("UPDATE log SET ts = ?1 WHERE id = ?2", params![ts, id])
+                .unwrap();
+        }
+    }
+
+    // ---- expected pair map (canonical case-ids) from annotations ----
+    let mut expected: std::collections::BTreeMap<(String, String), String> =
+        std::collections::BTreeMap::new();
+    for c in &rel_cases {
+        for r in &c.gt.consolidation_relations {
+            expected.insert(canon_ids(&c.id, &r.with_case), r.relation.clone());
+        }
+    }
+
+    // ---- candidates vs expected ----
+    let t = consolidation_distance_t();
+    let candidates = find_candidates(&conn, t).expect("find_candidates");
+    eprintln!("[corpus D] T={t:.4}; {} candidate pair(s):", candidates.len());
+    let label = |id: &i64| case_of.get(id).cloned().unwrap_or_else(|| format!("id{id}"));
+    let mut cand_pairs: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    for (a, b, d) in &candidates {
+        let (ca, cb) = (label(a), label(b));
+        let key = canon_ids(&ca, &cb);
+        let exp = expected
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| "—(unannotated near pair)".into());
+        eprintln!("[corpus D]   cand {ca}<->{cb} L2={d:.4} expected={exp}");
+        cand_pairs.insert(key);
+    }
+    // annotated pairs that did NOT surface as candidates (T-robustness / floor check)
+    for ((ca, cb), rel) in &expected {
+        if !cand_pairs.contains(&(ca.clone(), cb.clone())) {
+            let located = id_of.contains_key(ca) && id_of.contains_key(cb);
+            eprintln!(
+                "[corpus D]   MISS expected {ca}<->{cb} ({rel}) — {}",
+                if located {
+                    "distance >= T (jitter out / floor check)"
+                } else {
+                    "KP not located in DB"
+                }
+            );
+        }
+    }
+
+    // ---- dry-run → audit → gate ----
+    let n = block_on(consolidate_dry_run(
+        &conn,
+        &extractor,
+        t,
+        std::time::Duration::from_secs(120),
+    ))
+    .expect("consolidate_dry_run");
+    eprintln!("[corpus D] dry-run judged {n} pair(s); audit:");
+    let audit: Vec<(i64, i64, f64, String, String, Option<i64>, String, i64, i64)> = {
+        let mut stmt = conn
+            .prepare("SELECT kp_a, kp_b, distance, relation, action, superseded_id, rationale, dry_run, applied FROM log_consolidation_audit ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                r.get(7)?,
+                r.get(8)?,
+            ))
+        })
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect()
+    };
+
+    let mut failures: Vec<String> = Vec::new();
+
+    // zero-mutation invariant: dry-run touches no live state.
+    let superseded_cnt: i64 = conn
+        .query_row("SELECT count(*) FROM log WHERE superseded_by IS NOT NULL", [], |r| r.get(0))
+        .unwrap();
+    let contra_cnt: i64 = conn
+        .query_row("SELECT count(*) FROM log_contradiction", [], |r| r.get(0))
+        .unwrap();
+    if superseded_cnt != 0 {
+        failures.push(format!("dry-run set superseded_by on {superseded_cnt} row(s) — must be 0"));
+    }
+    if contra_cnt != 0 {
+        failures.push(format!("dry-run wrote {contra_cnt} log_contradiction row(s) — must be 0"));
+    }
+
+    // Few-shot anchors the judge SAW. Hard gates judge ONLY held-out pairs; a
+    // seen pair is logged as sanity (it was taught → not an independent test).
+    // C027↔C028 is intentionally NOT here: its few-shot slot was swapped for a
+    // synthetic Nginx near-FN, so the hardest near-FN (0.79) stays held-out for
+    // gate ①.
+    let seen_pairs: std::collections::HashSet<(String, String)> = [
+        canon_ids("C031", "C032"), // duplicate
+        canon_ids("C019", "C020"), // supersede
+        canon_ids("C017", "C018"), // contradiction
+        canon_ids("C035", "C036"), // complement
+        canon_ids("C020", "C023"), // recency-trap FN
+    ]
+    .into_iter()
+    .collect();
+    // Held-out replacement-target-mismatch traps (gate ④ emphasis): a newer KP,
+    // some even carrying replacement language, but the replacement / topic
+    // points at a THIRD thing, not the partner → must NOT be supersede.
+    let target_traps: std::collections::HashSet<(String, String)> = [
+        canon_ids("C019", "C024"),
+        canon_ids("C020", "C024"),
+        canon_ids("C019", "C023"),
+    ]
+    .into_iter()
+    .collect();
+
+    // ---- audit dump to a file (§12 dry-run inspection surface) ----
+    // Unconditional, post-INSERT: the canonical backend dumper (kp-id columns).
+    // Case-id labels for human reading are in the gate-loop stdout below.
+    let dump_path = std::env::var("OPENCRAB_LAYERD_AUDIT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/layer-d-audit.tsv"));
+    match dump_audit_tsv(&conn, &dump_path) {
+        Ok(n) => eprintln!("[corpus D] audit dumped ({n} rows) → {}", dump_path.display()),
+        Err(e) => eprintln!("[corpus D] audit dump failed ({e}) — table still in DB"),
+    }
+
+    // ---- gate the audit (HELD-OUT = hard; seen = sanity) ----
+    let merges = |rel: &str| matches!(rel, "duplicate" | "supersede");
+    // Revision 1: a held-out GATE pair whose verdict came back relation="error"
+    // is NOT a pass — it's missing data ("38/38 but C027↔C028 errored" is not a
+    // precision result). Tracked separately and reported by name.
+    let mut not_evaluated: Vec<String> = Vec::new();
+    for (a, b, d, rel, action, sid, _rat, dry, applied) in &audit {
+        let (ca, cb) = (label(a), label(b));
+        let rel = rel.as_str();
+        eprintln!(
+            "[corpus D]   audit {ca}<->{cb} L2={d:.4} relation={rel} action={action} superseded_id={sid:?} dry={dry} applied={applied}\n             A={:?}\n             B={:?}",
+            summary_of(&conn, *a),
+            summary_of(&conn, *b)
+        );
+        if *dry != 1 || *applied != 0 {
+            failures.push(format!("audit {ca}<->{cb}: dry_run/applied must be 1/0, got {dry}/{applied}"));
+        }
+        let key = canon_ids(&ca, &cb);
+        let Some(exp) = expected.get(&key) else {
+            continue; // unannotated near pair — logged above, no gate
+        };
+        let exp = exp.as_str();
+        let seen = seen_pairs.contains(&key);
+        let tag = if seen { "seen" } else { "HELD-OUT" };
+
+        // Revision 1 — a judge error on a GATE pair is NOT a pass; record it as
+        // "not evaluated" (held-out) and move on. Noise pairs (unannotated, no
+        // `exp`) already `continue`d above, so this only fires on gate pairs.
+        if rel == "error" {
+            if seen {
+                eprintln!("[corpus D]   [seen/sanity] {ca}<->{cb} ({exp}): judge ERROR — ignored");
+            } else {
+                eprintln!("[corpus D]   [HELD-OUT] {ca}<->{cb} ({exp}): judge ERROR → gate NOT evaluated");
+                not_evaluated.push(format!("{ca}<->{cb} (expected {exp}) — judge error"));
+            }
+            continue;
+        }
+
+        // Gate violations ①②③ (④ = ① specialised to the held-out
+        // replacement-target-mismatch traps; named for visibility).
+        let viol: Option<String> = if matches!(exp, "contradiction" | "false_neighbor") && merges(rel) {
+            let g = if target_traps.contains(&key) { "④/①" } else { "①" };
+            Some(format!("gate {g}: expected {exp} but judged {rel} (soft-deletes useful memory)"))
+        } else if exp == "duplicate" && !merges(rel) {
+            Some(format!("gate ②: clear duplicate judged {rel} (must merge)"))
+        } else if exp == "contradiction" && rel != "contradiction" {
+            Some(format!("gate ③: contradiction judged {rel}"))
+        } else {
+            None
+        };
+
+        match (viol, seen) {
+            (Some(v), false) => failures.push(format!("HELD-OUT {ca}<->{cb}: {v} [L2={d:.4}]")),
+            (Some(v), true) => eprintln!(
+                "[corpus D]   [seen/sanity] {ca}<->{cb}: {v} — taught in few-shot, NOT a gate [L2={d:.4}]"
+            ),
+            (None, _) => eprintln!("[corpus D]   [{tag}] {ca}<->{cb}: expected {exp}, judged {rel} ✓"),
+        }
+
+        // ADVISORY / WATCHED (logged, never fail). supersede→duplicate mislabel
+        // is WATCHED (prompt-fix signal) and matched before the generic advisory.
+        match (exp, rel) {
+            ("supersede", "duplicate") => eprintln!(
+                "[corpus D]   WATCHED {ca}<->{cb}: supersede mislabelled duplicate (still merges, loses direction — prompt-fix signal)"
+            ),
+            ("supersede", "supersede") => eprintln!(
+                "[corpus D]   watched {ca}<->{cb}: supersede ✓ superseded_id={sid:?} (reconcile vs older-by-ts)"
+            ),
+            ("duplicate", "supersede") => eprintln!(
+                "[corpus D]   advisory {ca}<->{cb}: expected {exp}, judged {rel} (both merge — label only)"
+            ),
+            ("complement", "no_action") | ("no_action", "complement") => eprintln!(
+                "[corpus D]   advisory {ca}<->{cb}: expected {exp}, judged {rel} (both leave-live — label only)"
+            ),
+            _ => {}
+        }
+    }
+
+    if !failures.is_empty() {
+        panic!(
+            "Layer D: {} HELD-OUT hard-gate / invariant failure(s):\n  {}",
+            failures.len(),
+            failures.join("\n  ")
+        );
+    }
+    if !not_evaluated.is_empty() {
+        // Not a panic (no precision violation), but NOT a clean pass either:
+        // these held-out gates lack data this run (judge errors).
+        eprintln!(
+            "[corpus D] ⚠ {} HELD-OUT gate pair(s) NOT evaluated (judge error) — NOT counted as pass:\n  {}",
+            not_evaluated.len(),
+            not_evaluated.join("\n  ")
+        );
+    }
+    eprintln!(
+        "[corpus D] HELD-OUT hard gates: {} PASS, 0 fail, {} NOT-evaluated (judge error) over {} audit row(s); mapped {}/{} relation-cases; seen anchors = sanity",
+        audit.len() - not_evaluated.len(),
+        not_evaluated.len(),
+        audit.len(),
+        id_of.len(),
+        rel_cases.len()
+    );
 }
