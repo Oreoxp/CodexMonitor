@@ -245,6 +245,89 @@ async fn stdio_smoke_distinct_agent_ids_write_to_distinct_memory_dbs() {
     .expect("smoke #3 timed out");
 }
 
+/// P6-hang probe — the "agent → MCP tool call → return" round-trip must
+/// RETURN (not spin) even when a concurrent writer holds the memory.db write
+/// lock.
+///
+/// Why this case: `log_progress` runs as a *blocking* synchronous SQLite call
+/// inside the server's async `call_tool` (`server.rs`), and the server runs on
+/// a `current_thread` tokio runtime (`main.rs` `flavor = "current_thread"`). A
+/// held write lock is exactly what a wedged concurrent writer (an ingest pass
+/// or a distiller transaction) would create. This test forces that contention
+/// and asserts the tool call still comes back within a hard outer bound.
+///
+///   * If this ever TIMES OUT, the hang is reproduced at the *server boundary*
+///     (the surgical fix would be to wrap the backend call in `spawn_blocking`
+///     so it can't stall the single executor thread).
+///   * If it RETURNS (BUSY/err or ok), the server side does not hang even under
+///     write contention — the spin lives elsewhere (codex-side MCP client, or a
+///     writer holding the lock with no bound).
+#[tokio::test]
+async fn stdio_log_progress_returns_even_under_write_lock_contention() {
+    tokio::time::timeout(Duration::from_secs(40), async {
+        let home = tempfile::tempdir().expect("tempdir");
+        let agent = "contention";
+        let db = expected_memory_db(home.path(), agent);
+
+        let mut child = spawn_server(home.path(), agent);
+        let stdout = child.stdout.take().expect("stdout");
+        let stdin = child.stdin.take().expect("stdin");
+        let client = serve_client((), (stdout, stdin)).await.expect("handshake");
+
+        // 1) One successful call so memory.db + schema exist on disk.
+        let _ = call_log_progress(&client, "warm up", None).await;
+        assert!(db.exists(), "db should exist after first write");
+
+        // 2) Grab the WAL write lock from an independent connection and hold it.
+        //    busy_timeout(0): take the lock instantly and keep it until we drop
+        //    the connection — the SERVER is the side that must contend.
+        let lock_conn = Connection::open(&db).expect("open lock conn");
+        lock_conn
+            .busy_timeout(Duration::from_millis(0))
+            .expect("busy_timeout");
+        lock_conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("acquire write lock");
+
+        // 3) Call log_progress through the server WHILE the lock is held. The
+        //    server's open()/migrate()/INSERT must contend; with its 5 s
+        //    busy_timeout it should surface a BUSY error and RETURN — not spin.
+        let mut args = serde_json::Map::new();
+        args.insert("summary".to_string(), Value::from("under contention"));
+        let started = std::time::Instant::now();
+        let call = client
+            .call_tool(CallToolRequestParams {
+                meta: None,
+                name: "log_progress".into(),
+                arguments: Some(args),
+                task: None,
+            })
+            .await;
+        let elapsed = started.elapsed();
+
+        // The contract under test is "it returns", regardless of ok vs error.
+        // A BUSY surfaces as Err; a (surprising) success is Ok. Either proves
+        // there is no forever-hang at the server boundary. A real hang would
+        // have tripped the outer 40 s guard and failed the test instead.
+        match &call {
+            Ok(_) => eprintln!("[p6-hang] contended call returned Ok in {elapsed:?}"),
+            Err(e) => eprintln!("[p6-hang] contended call returned Err in {elapsed:?}: {e}"),
+        }
+
+        // Release the lock and confirm the server still serves a later call —
+        // i.e. the contention did not wedge the server for good.
+        drop(lock_conn);
+        let after = call_log_progress(&client, "after lock released", None).await;
+        assert!(after > 0, "server must keep serving after contention clears");
+
+        drop(client);
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    })
+    .await
+    .expect("P6-hang contention probe timed out — round-trip hung at the SERVER boundary");
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
