@@ -833,7 +833,7 @@ fn corpus_layer_c_search() {
 // the density Layer C's per-group split deliberately does NOT exercise) →
 // distill → embed → inject `log.ts` from `created_at_offset_hours` (so the
 // supersede direction is judgeable) → `find_candidates(T)` (report candidates
-// vs the annotated expected pairs) → `consolidate_dry_run` and machine-check
+// vs the annotated expected pairs) → `consolidate_once` (dry-run) and machine-check
 // the audit:
 //
 //   HARD gates (precision — the ones to watch):
@@ -1014,13 +1014,14 @@ fn corpus_layer_d_consolidate() {
     }
 
     // ---- dry-run → audit → gate ----
-    let n = block_on(consolidate_dry_run(
+    let n = block_on(consolidate_once(
         &conn,
         &extractor,
         t,
         std::time::Duration::from_secs(120),
+        true, // dry-run: this Layer-D gate previews verdicts, never mutates.
     ))
-    .expect("consolidate_dry_run");
+    .expect("consolidate_once");
     eprintln!("[corpus D] dry-run judged {n} pair(s); audit:");
     let audit: Vec<(i64, i64, f64, String, String, Option<i64>, String, i64, i64)> = {
         let mut stmt = conn
@@ -1198,4 +1199,130 @@ fn corpus_layer_d_consolidate() {
         id_of.len(),
         rel_cases.len()
     );
+}
+
+// ===========================================================================
+// Layer D-apply (`#[ignore]`) — the APPLY counterpart of Layer D. Runs the real
+// pipeline, then `consolidate_once(dry_run=false)` to MUTATE live state:
+// dedup/supersede set `superseded_by`, contradictions write `log_contradiction`.
+// Asserts that every KP the apply path superseded then DISAPPEARS from a hybrid
+// search seeded with its own text — proving apply + the search-side superseded
+// filter compose. Known corpus targets the judge should merge: dup C031<->C032,
+// supersede C021<->C022. Needs the real LLM + embedder; user runs from a terminal:
+//   cargo test --bin opencrab-memory-mcp -- --ignored corpus_layer_d_apply --nocapture
+// ===========================================================================
+#[test]
+#[ignore]
+fn corpus_layer_d_apply() {
+    let Some(extractor) = HttpExtractor::load() else {
+        eprintln!("[corpus D-apply] no distiller config — SKIPPING");
+        return;
+    };
+    let Some(embedder) = HttpEmbedder::load() else {
+        eprintln!("[corpus D-apply] no embedder config — SKIPPING");
+        return;
+    };
+    let cases = load_cases();
+    let rel_cases: Vec<&Case> = cases
+        .iter()
+        .filter(|c| !c.gt.consolidation_relations.is_empty())
+        .collect();
+    assert!(!rel_cases.is_empty(), "no cases carry consolidation_relations");
+
+    // ---- one dense DB: ingest ALL relation cases, distill, embed ----
+    let agent = rel_cases[0].gt.agent_id.clone();
+    let tmp = tempfile::tempdir().unwrap();
+    let scan_root = tmp.path().join("agents").join(&agent).join("team_sessions");
+    for c in &rel_cases {
+        stage_rollout(&scan_root, c);
+    }
+    let db = tmp.path().join("memory.db");
+    let conn = open(&db).unwrap();
+    ingest_once(&conn, &scan_root, &agent).unwrap();
+    let now_ms = current_time_ms() + DISTILL_IDLE_MS + 60_000;
+    block_on(distill_once(&conn, &extractor, now_ms)).expect("distill_once");
+    block_on(embed_pending_once(&conn, &embedder)).expect("embed_pending_once");
+
+    // ---- inject ts from created_at_offset_hours so direction is real ----
+    // (greedy locator-token map, same as Layer D — supersede/dup must pick the
+    // right older KP; unmapped cases keep their distilled ts.)
+    let base = current_time_ms();
+    let all_rows: Vec<(i64, String, Option<String>)> = {
+        let mut stmt = conn
+            .prepare("SELECT id, summary, detail FROM log WHERE origin='distill' ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    };
+    let mut claimed: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let mut order: Vec<&Case> = rel_cases.clone();
+    order.sort_by_key(|c| std::cmp::Reverse(locator_groups(&c.gt).len()));
+    for c in &order {
+        let groups = locator_groups(&c.gt);
+        if groups.is_empty() {
+            continue;
+        }
+        let hit = all_rows.iter().find(|(id, s, d)| {
+            !claimed.contains(id)
+                && all_groups(&format!("{s}\n{}", d.as_deref().unwrap_or("")), &groups)
+        });
+        if let (Some(off), Some((id, _, _))) = (c.gt.created_at_offset_hours, hit) {
+            claimed.insert(*id);
+            conn.execute("UPDATE log SET ts=?1 WHERE id=?2", params![base + off * 3_600_000, id])
+                .unwrap();
+        }
+    }
+
+    // ---- APPLY: judge + mutate in one pass ----
+    let t = consolidation_distance_t();
+    let n = block_on(consolidate_once(
+        &conn,
+        &extractor,
+        t,
+        std::time::Duration::from_secs(120),
+        false, // APPLY: mutate live state.
+    ))
+    .expect("consolidate_once apply");
+    eprintln!("[corpus D-apply] judged+applied {n} pair(s)");
+
+    // ---- every superseded KP must vanish from a search seeded with its own text ----
+    let superseded: Vec<(i64, i64, String, Option<String>)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, superseded_by, summary, detail FROM log \
+                 WHERE superseded_by IS NOT NULL ORDER BY id",
+            )
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    };
+    let contra: i64 = conn
+        .query_row("SELECT count(*) FROM log_contradiction", [], |r| r.get(0))
+        .unwrap();
+    eprintln!(
+        "[corpus D-apply] {} KP(s) superseded, {} contradiction edge(s)",
+        superseded.len(),
+        contra
+    );
+    assert!(
+        !superseded.is_empty(),
+        "apply must supersede at least the known dup/supersede pairs (C031<->C032, C021<->C022)"
+    );
+    drop(conn);
+
+    let mut failures: Vec<String> = Vec::new();
+    for (dead, survivor, summary, detail) in &superseded {
+        let query = format!("{summary} {}", detail.as_deref().unwrap_or(""));
+        let hits = block_on(search(&db, Some(&embedder), &query, 10)).expect("search");
+        let ids: Vec<i64> = hits.iter().map(|h| h.id).collect();
+        eprintln!("[corpus D-apply]   superseded {dead} (→{survivor}) — search(own text) = {ids:?}");
+        if ids.contains(dead) {
+            failures.push(format!("superseded KP {dead} still surfaces for its own text: {ids:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "Layer D-apply: {}", failures.join("; "));
 }

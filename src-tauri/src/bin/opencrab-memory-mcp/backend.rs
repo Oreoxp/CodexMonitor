@@ -173,6 +173,13 @@ pub const RRF_K: usize = 60;
 pub const SEARCH_POOL_MULTIPLIER: usize = 4;
 pub const SEARCH_POOL_MIN: usize = 20;
 
+/// KNN over-fetch factor. vec0 applies its `k = ?` nearest-k cut BEFORE the
+/// joined `superseded_by IS NULL` filter, so asking for exactly `pool_size`
+/// would under-fill whenever some of the nearest rows are superseded. We ask
+/// vec0 for `pool_size * KNN_OVERFETCH` (a full-scan, so a larger k is
+/// effectively free) and keep the first `pool_size` LIVE ids.
+pub const KNN_OVERFETCH: usize = 2;
+
 /// Hard wall-clock budget for embedding the user's query at search
 /// time. If the embedder takes longer than this, we abort and fall
 /// back to pure FTS — `memory_search` MUST stay snappy even if the
@@ -268,7 +275,7 @@ fn fts_ranked_ids(
 ) -> Result<Vec<i64>, BackendError> {
     let mut stmt = conn.prepare(
         "SELECT log.id FROM log_fts JOIN log ON log.id = log_fts.rowid \
-         WHERE log_fts MATCH ?1 \
+         WHERE log_fts MATCH ?1 AND log.superseded_by IS NULL \
          ORDER BY bm25(log_fts) \
          LIMIT ?2",
     )?;
@@ -315,32 +322,42 @@ async fn embed_query_with_timeout(
     Ok(q_vec)
 }
 
-/// Sync: KNN over log_vec given an already-computed query embedding.
-/// Returns the rowids in distance-ascending order. vec0 needs either
-/// `LIMIT` or `k = ?` on its own scan — we use `k = ?` because it
-/// composes safely with JOINs at the call site, even though here
-/// we're just selecting rowid.
+/// Sync: KNN over log_vec given an already-computed query embedding, JOINed
+/// back to `log` so superseded rows are filtered out before they ever reach
+/// RRF. Returns up to `pool_size` LIVE rowids in distance-ascending order.
+///
+/// vec0 applies its `k = ?` nearest-k constraint BEFORE the joined
+/// `superseded_by IS NULL` predicate, so a plain `k = pool_size` would
+/// under-fill when some of the k nearest are superseded. We over-fetch
+/// `k = pool_size * KNN_OVERFETCH` (a vec0 full-scan, so the larger k is
+/// effectively free) and keep the first `pool_size` live ids. `k = ?` (not
+/// `LIMIT`) is what composes with the JOIN here — exactly what the original
+/// `k = ?` choice was reserved for.
 fn knn_ranked_ids(
     conn: &Connection,
     q_vec: &[f32],
     pool_size: usize,
 ) -> Result<Vec<i64>, String> {
     let q_json = vec_to_match_json(q_vec);
+    let k = pool_size.saturating_mul(KNN_OVERFETCH);
     let mut stmt = conn
         .prepare(
-            "SELECT rowid FROM log_vec \
-             WHERE embedding MATCH ?1 AND k = ?2 \
+            "SELECT log_vec.rowid FROM log_vec \
+             JOIN log ON log.id = log_vec.rowid \
+             WHERE log_vec.embedding MATCH ?1 AND k = ?2 \
+               AND log.superseded_by IS NULL \
              ORDER BY distance",
         )
         .map_err(|e| format!("prepare KNN: {e}"))?;
     let rows = stmt
-        .query_map(params![q_json, pool_size as i64], |row| {
-            row.get::<_, i64>(0)
-        })
+        .query_map(params![q_json, k as i64], |row| row.get::<_, i64>(0))
         .map_err(|e| format!("KNN query: {e}"))?;
     let mut out: Vec<i64> = Vec::with_capacity(pool_size);
     for r in rows {
         out.push(r.map_err(|e| format!("KNN row: {e}"))?);
+        if out.len() >= pool_size {
+            break;
+        }
     }
     Ok(out)
 }
@@ -1745,15 +1762,19 @@ Your output should be exactly (a mechanical edit that just completed is an echo 
 // (a false-neighbour pair measured 0.79 — closer than a true contradiction at
 // 0.80), so distance can't separate the relations.
 //
-// This module is DRY-RUN ONLY: it judges candidate pairs and appends an audit
-// trail. Setting `superseded_by`, writing `log_contradiction`, and filtering
-// search are all the APPLY path (S5-C) — nothing here mutates a live row.
+// This module judges candidate pairs, appends an audit trail, and — in APPLY
+// mode (`dry_run=false`) — mutates live state: `superseded_by` for
+// dedup/supersede, a `log_contradiction` edge for contradictions. Search-side
+// filtering of superseded rows lives in `search` (the FTS + KNN halves), not
+// here. `dry_run=true` preserves the original preview behaviour (audit only,
+// zero mutation).
 //
-// The whole module is `#[allow(dead_code)]` as a unit: the runtime loop that
-// drives `consolidate_dry_run` lands in S5-C. Until then these items are
-// exercised by Layer D (`corpus_layer_d_consolidate`) + the judge-parser unit
-// tests. Reuses the distiller's wire layer (`HttpExtractor::post_chat`) — same
-// model + creds, new prompt, no new HTTP code.
+// The whole module is `#[allow(dead_code)]` as a unit: the background loop that
+// drives `consolidate_once` in production lands in S5-C-2. Until then these
+// items are exercised by Layer D (`corpus_layer_d_consolidate` /
+// `corpus_layer_d_apply`) + the apply / judge unit tests. Reuses the distiller's
+// wire layer (`HttpExtractor::post_chat`) — same model + creds, new prompt, no
+// new HTTP code.
 // ===========================================================================
 #[allow(dead_code)]
 mod consolidate {
@@ -1762,7 +1783,7 @@ mod consolidate {
         ExtractError, HttpExtractor,
     };
     use futures_util::stream::StreamExt;
-    use rusqlite::{params, Connection};
+    use rusqlite::{params, Connection, OptionalExtension};
     use std::path::Path;
 
     /// The five-way relation a judge can assign to a candidate KP pair.
@@ -1923,7 +1944,7 @@ mod consolidate {
         }
     }
 
-    /// The judging seam behind `consolidate_dry_run`. A trait (not the concrete
+    /// The judging seam behind `consolidate_once`. A trait (not the concrete
     /// `HttpExtractor::judge`) so the dry-run is unit-testable with a mock judge
     /// — mirrors how `Extractor` abstracts distillation. `Sync` so a shared
     /// `&judge` can drive bounded-concurrency judging.
@@ -2078,11 +2099,230 @@ mod consolidate {
         Ok(kp)
     }
 
-    /// Dry-run consolidation: find candidates, judge each, append an audit row
-    /// (`dry_run=1, applied=0`). ZERO mutation of live state — no superseded_by,
-    /// no log_contradiction. The apply path (S5-C) consumes these audit rows.
-    /// Returns the number of audit rows written (== candidate count, errors
-    /// included).
+    /// Pure: decide the soft-merge direction for one judged pair from the two KP
+    /// ids, their `ts`, and (for supersede) the judge's claimed `superseded_id`.
+    /// NO DB — the referential-integrity guards live in `apply_verdict`. This is
+    /// the load-bearing direction logic:
+    ///   * duplicate  → retire the OLDER (by ts; tie → smaller id), keep newer.
+    ///   * supersede  → ts decides direction; the judge must AGREE the older one
+    ///     is the replaced one, else we refuse to guess (`Skip`). Co-temporal →
+    ///     fall back to the judge's named member; if it named neither, `Skip`.
+    ///   * contradiction → `Contradict`; complement / no_action → `Leave`.
+    #[derive(Debug, PartialEq, Eq)]
+    pub enum MergeDecision {
+        /// Set `log[superseded].superseded_by = survivor`.
+        Supersede { superseded: i64, survivor: i64 },
+        /// Record a contradiction edge; leave `superseded_by` untouched.
+        Contradict,
+        /// No mutation (complement / no_action).
+        Leave,
+        /// No mutation; append this marker to the audit rationale.
+        Skip(&'static str),
+    }
+
+    pub fn decide_merge(
+        relation: Relation,
+        a: i64,
+        ts_a: i64,
+        b: i64,
+        ts_b: i64,
+        judge_superseded_id: Option<i64>,
+    ) -> MergeDecision {
+        use std::cmp::Ordering;
+        match relation {
+            Relation::Complement | Relation::NoAction => MergeDecision::Leave,
+            Relation::Contradiction => MergeDecision::Contradict,
+            Relation::Duplicate => {
+                // Keep newer, retire older; co-temporal → the smaller id is older.
+                let superseded = match ts_a.cmp(&ts_b) {
+                    Ordering::Less => a,
+                    Ordering::Greater => b,
+                    Ordering::Equal => a.min(b),
+                };
+                let survivor = if superseded == a { b } else { a };
+                MergeDecision::Supersede { superseded, survivor }
+            }
+            Relation::Supersede => match ts_a.cmp(&ts_b) {
+                // Co-temporal: ts can't direct it → trust the judge's named member.
+                Ordering::Equal => match judge_superseded_id {
+                    Some(x) if x == a => MergeDecision::Supersede { superseded: a, survivor: b },
+                    Some(x) if x == b => MergeDecision::Supersede { superseded: b, survivor: a },
+                    _ => MergeDecision::Skip("[apply skipped: supersede direction undeterminable]"),
+                },
+                ord => {
+                    let (older, newer) = if ord == Ordering::Less { (a, b) } else { (b, a) };
+                    // Require the judge to agree the OLDER one is the replaced one.
+                    if judge_superseded_id == Some(older) {
+                        MergeDecision::Supersede { superseded: older, survivor: newer }
+                    } else {
+                        MergeDecision::Skip("[apply skipped: judge/ts direction mismatch]")
+                    }
+                }
+            },
+        }
+    }
+
+    /// Apply one real verdict's mutation inside the caller's transaction `tx`.
+    /// Returns `(applied, rationale)`: `applied=true` ONLY when a live row was
+    /// actually mutated; on any guard miss `applied=false` and a
+    /// `[apply skipped: …]` marker is appended to the rationale. Enforces the
+    /// referential integrity SQLite's declarative FK does not — both KPs must
+    /// exist, and BOTH endpoints must still be live: the survivor (never point a
+    /// row at a non-live survivor) AND the loser (first-survivor-wins — a KP is
+    /// superseded at most once per round; a later pair retiring it again audits as
+    /// a skip). This is NOT chain elimination: a survivor itself later superseded
+    /// still forms a chain, which the chain-agnostic search filter hides at any depth.
+    fn apply_verdict(
+        tx: &Connection,
+        a: i64,
+        b: i64,
+        audit_id: i64,
+        relation: Relation,
+        judge_superseded_id: Option<i64>,
+        base_rationale: &str,
+    ) -> Result<(bool, String), BackendError> {
+        let skip = |marker: &str| (false, format!("{base_rationale} {marker}"));
+
+        if matches!(relation, Relation::Contradiction) {
+            let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+            let changed = tx.execute(
+                "INSERT INTO log_contradiction (id_a, id_b, audit_id) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(id_a, id_b) DO NOTHING",
+                params![lo, hi, audit_id],
+            )?;
+            return Ok((changed > 0, base_rationale.to_string()));
+        }
+
+        // dup / supersede → maybe a `superseded_by` update; complement/no_action → Leave.
+        let ts_of = |id: i64| -> Result<Option<i64>, BackendError> {
+            Ok(tx
+                .query_row("SELECT ts FROM log WHERE id = ?1", params![id], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .optional()?)
+        };
+        let (Some(ts_a), Some(ts_b)) = (ts_of(a)?, ts_of(b)?) else {
+            return Ok(skip("[apply skipped: KP missing]"));
+        };
+
+        match decide_merge(relation, a, ts_a, b, ts_b, judge_superseded_id) {
+            MergeDecision::Leave => Ok((false, base_rationale.to_string())),
+            MergeDecision::Contradict => unreachable!("contradiction handled above"),
+            MergeDecision::Skip(marker) => Ok(skip(marker)),
+            MergeDecision::Supersede { superseded, survivor } => {
+                if superseded == survivor {
+                    return Ok(skip("[apply skipped: self-merge]"));
+                }
+                // Read one row's state. Outer Option = row present? (both exist —
+                // `ts_of` guarded above); inner Option = its superseded_by NULL?
+                let state_of = |id: i64| -> Result<Option<Option<i64>>, BackendError> {
+                    Ok(tx
+                        .query_row(
+                            "SELECT superseded_by FROM log WHERE id = ?1",
+                            params![id],
+                            |r| r.get::<_, Option<i64>>(0),
+                        )
+                        .optional()?)
+                };
+                // The loser must still be live — first-survivor-wins: a KP is
+                // superseded at most once per round (a later pair retiring it again
+                // audits as a skip, never overwriting its survivor pointer). NOT
+                // chain elimination: a survivor later superseded still forms a chain,
+                // which the chain-agnostic search filter hides at any depth.
+                match state_of(superseded)? {
+                    None => return Ok(skip("[apply skipped: superseded KP missing]")),
+                    Some(Some(_)) => return Ok(skip("[apply skipped: loser already superseded]")),
+                    Some(None) => {}
+                }
+                // The survivor must still be live — never point at a non-live row.
+                match state_of(survivor)? {
+                    None => Ok(skip("[apply skipped: survivor missing]")),
+                    Some(Some(_)) => Ok(skip("[apply skipped: survivor no longer live]")),
+                    Some(None) => {
+                        tx.execute(
+                            "UPDATE log SET superseded_by = ?1 WHERE id = ?2",
+                            params![survivor, superseded],
+                        )?;
+                        Ok((true, base_rationale.to_string()))
+                    }
+                }
+            }
+        }
+    }
+
+    /// One pair's phase-3 work in a single transaction: INSERT the audit row,
+    /// then — APPLY mode (`dry_run=false`) on a real verdict only — mutate live
+    /// state via `apply_verdict` and stamp `applied` / the augmented rationale.
+    /// The audit row and its mutation commit together or roll back together
+    /// (`unchecked_transaction` because `consolidate_once` holds `&Connection`).
+    /// An error verdict (`relation="error"`) is audited but never applied.
+    pub fn consolidate_pair(
+        conn: &Connection,
+        run_ts: i64,
+        a: i64,
+        b: i64,
+        dist: f64,
+        verdict: Result<JudgeVerdict, String>,
+        dry_run: bool,
+    ) -> Result<(), BackendError> {
+        let (relation_str, action, base_rationale, superseded_id, rel_enum): (
+            &str,
+            &str,
+            String,
+            Option<i64>,
+            Option<Relation>,
+        ) = match verdict {
+            Ok(v) => (
+                v.relation.as_str(),
+                v.relation.intent_action(),
+                v.rationale,
+                v.superseded_id,
+                Some(v.relation),
+            ),
+            // `relation="error"` is NOT one of the five — audited, never applied.
+            Err(reason) => ("error", "error", reason, None, None),
+        };
+
+        let tx = conn.unchecked_transaction()?;
+        let dry_flag: i64 = if dry_run { 1 } else { 0 };
+        tx.execute(
+            "INSERT INTO log_consolidation_audit\
+             (run_ts, kp_a, kp_b, distance, relation, action, rationale, superseded_id, dry_run, applied)\
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0)",
+            params![run_ts, a, b, dist, relation_str, action, base_rationale, superseded_id, dry_flag],
+        )?;
+        let audit_id = tx.last_insert_rowid();
+
+        // Apply only in apply mode AND only for a real (non-error) verdict.
+        let (applied, rationale) = match (dry_run, rel_enum) {
+            (false, Some(rel)) => {
+                apply_verdict(&tx, a, b, audit_id, rel, superseded_id, &base_rationale)?
+            }
+            _ => (false, base_rationale.clone()),
+        };
+        if applied || rationale != base_rationale {
+            tx.execute(
+                "UPDATE log_consolidation_audit SET applied = ?1, rationale = ?2 WHERE id = ?3",
+                params![applied as i64, rationale, audit_id],
+            )?;
+        }
+        tx.commit()?;
+
+        eprintln!(
+            "[consolidate {}] {a}<->{b} L2={dist:.4} → {relation_str} (superseded_id={superseded_id:?}) applied={applied} :: {rationale}",
+            if dry_run { "dry-run" } else { "apply" }
+        );
+        Ok(())
+    }
+
+    /// Consolidate candidate pairs. `dry_run=true` preserves the original
+    /// preview behaviour — judge each pair and append an audit row
+    /// (`dry_run=1, applied=0`), ZERO mutation of live state. `dry_run=false` is
+    /// judge-and-apply in one pass: each audit row is written `dry_run=0`, then
+    /// (for a real verdict) the live mutation runs in the SAME transaction and
+    /// `applied` is set to 1 iff a row was actually mutated (see
+    /// `consolidate_pair` / `apply_verdict`). Returns the number of audit rows
+    /// written (== candidate count, errors included).
     ///
     /// Three phases keep the `!Sync` `Connection` out of the concurrent judging:
     ///   1. (conn) `find_candidates` + load every `KpRef`.
@@ -2093,25 +2333,26 @@ mod consolidate {
     ///      reliably catch through the local proxy) is force-aborted →
     ///      `relation="error"` verdict, never a panic, other in-flight calls
     ///      untouched.
-    ///   3. (conn) sort by `(id_a,id_b)`, sequential INSERT — one audit row per
-    ///      candidate (errors/timeouts included), deterministic order.
+    ///   3. (conn) sort by `(id_a,id_b)`, then one `consolidate_pair` per
+    ///      candidate (each its own transaction) — deterministic order.
     ///
     /// REQUIRES a runtime with the TIME DRIVER on (`enable_all` / `enable_time`):
     /// both the per-call `tokio::time::timeout` AND reqwest's own timeout are
     /// timer-driven — on a runtime without a timer NEITHER fires and a hung call
-    /// hangs forever. `block_on` (tests) uses `enable_all`; S5-C's loop MUST too.
+    /// hangs forever. `block_on` (tests) uses `enable_all`; S5-C-2's loop MUST too.
     ///
     /// !Send BY DESIGN: `conn` (rusqlite Connection, `!Sync`) is alive across the
     /// phase-2 `.await`, so this future is `!Send`. Run it ONLY on a current-thread
-    /// runtime / LocalSet / `block_on` — tests, and S5-C's background low-frequency
-    /// consolidation loop. NEVER call it from rmcp `call_tool` (which requires a
-    /// `Send` future): that is the exact `!Sync`-across-await wall `search` dodged
-    /// by staging its connection behind a `&Path` open-per-phase.
-    pub async fn consolidate_dry_run<J: ConsolidationJudge>(
+    /// runtime / LocalSet / `block_on` — tests, and S5-C-2's background
+    /// low-frequency consolidation loop. NEVER call it from rmcp `call_tool` (which
+    /// requires a `Send` future): that is the exact `!Sync`-across-await wall
+    /// `search` dodged by staging its connection behind a `&Path` open-per-phase.
+    pub async fn consolidate_once<J: ConsolidationJudge>(
         conn: &Connection,
         judge: &J,
         t: f64,
         judge_timeout: std::time::Duration,
+        dry_run: bool,
     ) -> Result<usize, BackendError> {
         // ---- Phase 1 (conn): candidates + KpRefs ----
         let candidates = find_candidates(conn, t)?;
@@ -2164,34 +2405,16 @@ mod consolidate {
                 .collect()
                 .await;
 
-        // ---- Phase 3 (conn): deterministic sequential INSERT ----
+        // ---- Phase 3 (conn): per-pair atomic audit + (apply mode) mutation ----
+        // Each pair is its own transaction (audit row + any mutation commit
+        // together). Sequential + committed → a later pair sees an earlier
+        // pair's superseded_by, so the survivor-still-live guard works within
+        // one run. `relation="error"` rows are audited but never applied.
         results.sort_by(|x, y| (x.0, x.1).cmp(&(y.0, y.1)));
         let run_ts = current_time_ms();
         let mut written = 0usize;
         for (a, b, dist, r) in results {
-            // `relation="error"` is NOT one of the five — the reader (Layer D)
-            // treats a held-out gate pair that errored / timed out as "NOT
-            // evaluated", never a pass. The reason (incl. "judge timeout after
-            // Ns") becomes the audit rationale; one row per candidate.
-            let (relation, action, rationale, superseded_id): (&str, &str, String, Option<i64>) =
-                match r {
-                    Ok(v) => (
-                        v.relation.as_str(),
-                        v.relation.intent_action(),
-                        v.rationale,
-                        v.superseded_id,
-                    ),
-                    Err(reason) => ("error", "error", reason, None),
-                };
-            eprintln!(
-                "[consolidate dry-run] {a}<->{b} L2={dist:.4} → {relation} (superseded_id={superseded_id:?}) :: {rationale}"
-            );
-            conn.execute(
-                "INSERT INTO log_consolidation_audit\
-                 (run_ts, kp_a, kp_b, distance, relation, action, rationale, superseded_id, dry_run, applied)\
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, 0)",
-                params![run_ts, a, b, dist, relation, action, rationale, superseded_id],
-            )?;
+            consolidate_pair(conn, run_ts, a, b, dist, r, dry_run)?;
             written += 1;
         }
         Ok(written)
@@ -5887,12 +6110,12 @@ mod tests {
         );
     }
 
-    // ---- consolidate_dry_run parallel judging + audit dump (deterministic) ----
+    // ---- consolidate_once parallel judging + audit dump (deterministic) ----
 
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Mock judge: counts calls, tracks peak concurrency, optionally errors on
-    /// one canonical pair. No network — drives `consolidate_dry_run` offline.
+    /// one canonical pair. No network — drives `consolidate_once` offline.
     struct MockJudge {
         in_flight: AtomicUsize,
         max_in_flight: AtomicUsize,
@@ -6007,11 +6230,12 @@ mod tests {
 
         let err_pair = (ids[0], ids[1]); // canonical (sorted ids)
         let judge = MockJudge::new(Some(err_pair));
-        let written = block_on(consolidate_dry_run(
+        let written = block_on(consolidate_once(
             &conn,
             &judge,
             1.10,
             std::time::Duration::from_secs(120),
+            true,
         ))
         .unwrap();
 
@@ -6060,11 +6284,12 @@ mod tests {
         let conn = open(&db).unwrap();
         let n_cand = find_candidates(&conn, 1.10).unwrap().len();
         let judge = MockJudge::new(None);
-        block_on(consolidate_dry_run(
+        block_on(consolidate_once(
             &conn,
             &judge,
             1.10,
             std::time::Duration::from_secs(120),
+            true,
         ))
         .unwrap();
 
@@ -6095,11 +6320,12 @@ mod tests {
         let judge = MockJudge::pending(hang_pair);
 
         // Tiny timeout so the hung pair aborts fast — the whole test must NOT hang.
-        let written = block_on(consolidate_dry_run(
+        let written = block_on(consolidate_once(
             &conn,
             &judge,
             1.10,
             std::time::Duration::from_millis(100),
+            true,
         ))
         .unwrap();
         assert_eq!(written, n_cand, "every candidate written, incl. the timed-out pair");
@@ -6141,11 +6367,12 @@ mod tests {
         let flaky_pair = (ids[0], ids[1]); // canonical (sorted)
         // hang the first 2 attempts (= MAX_JUDGE_RETRIES), recover on the 3rd.
         let judge = MockJudge::flaky(flaky_pair, 2);
-        let written = block_on(consolidate_dry_run(
+        let written = block_on(consolidate_once(
             &conn,
             &judge,
             1.10,
             std::time::Duration::from_millis(50),
+            true,
         ))
         .unwrap();
         assert_eq!(written, n_cand, "one audit row per candidate, incl. the recovered pair");
@@ -6167,6 +6394,152 @@ mod tests {
             .query_row("SELECT count(*) FROM log_consolidation_audit WHERE relation='error'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(errs, 0, "no error rows — every pair resolved");
+    }
+
+    // ---- S5-C apply: direction + referential integrity + live mutation ----
+
+    /// Seed a `log` row with an explicit `ts` — apply direction is ts-driven, so
+    /// the apply tests must control it. Returns the new id.
+    fn seed_kp_with_ts(conn: &Connection, ts: i64, summary: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO log(ts, summary, detail, origin) VALUES (?1, ?2, ?3, 'self')",
+            params![ts, summary, format!("{summary} detail")],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    // S5C.A — decide_merge: the pure direction matrix (no DB). The load-bearing
+    // logic the architect flagged: dup retires older, supersede demands the judge
+    // agree with ts (else skip), co-temporal falls back to the judge's pick.
+    #[test]
+    fn apply_decide_merge_direction_matrix() {
+        // duplicate → retire the older (by ts); survivor is the newer.
+        assert_eq!(
+            decide_merge(Relation::Duplicate, 10, 100, 20, 200, None),
+            MergeDecision::Supersede { superseded: 10, survivor: 20 }
+        );
+        // duplicate tie on ts → the smaller id is the (retired) older one.
+        assert_eq!(
+            decide_merge(Relation::Duplicate, 20, 100, 10, 100, None),
+            MergeDecision::Supersede { superseded: 10, survivor: 20 }
+        );
+        // supersede, judge agrees the older (10) is replaced → apply.
+        assert_eq!(
+            decide_merge(Relation::Supersede, 10, 100, 20, 200, Some(10)),
+            MergeDecision::Supersede { superseded: 10, survivor: 20 }
+        );
+        // supersede, judge points at the NEWER (20) → direction mismatch → skip.
+        assert_eq!(
+            decide_merge(Relation::Supersede, 10, 100, 20, 200, Some(20)),
+            MergeDecision::Skip("[apply skipped: judge/ts direction mismatch]")
+        );
+        // supersede co-temporal → trust the judge's named member.
+        assert_eq!(
+            decide_merge(Relation::Supersede, 10, 100, 20, 100, Some(20)),
+            MergeDecision::Supersede { superseded: 20, survivor: 10 }
+        );
+        // supersede co-temporal, judge named neither → undeterminable → skip.
+        assert_eq!(
+            decide_merge(Relation::Supersede, 10, 100, 20, 100, None),
+            MergeDecision::Skip("[apply skipped: supersede direction undeterminable]")
+        );
+        // non-merge relations.
+        assert_eq!(decide_merge(Relation::Contradiction, 1, 0, 2, 0, None), MergeDecision::Contradict);
+        assert_eq!(decide_merge(Relation::Complement, 1, 0, 2, 0, None), MergeDecision::Leave);
+        assert_eq!(decide_merge(Relation::NoAction, 1, 0, 2, 0, None), MergeDecision::Leave);
+    }
+
+    // S5C.B — consolidate_pair(dry_run=false): real mutation + audit bookkeeping
+    // + the referential-integrity guard. Drives apply with scripted verdicts —
+    // no vectors / find_candidates needed (per the architect's escape hatch).
+    #[test]
+    fn apply_verdict_mutates_live_state() {
+        let (_tmp, db) = db_path();
+        let conn = open(&db).unwrap();
+        let run_ts = current_time_ms();
+        let v = |rel: Relation, sid: Option<i64>| -> Result<JudgeVerdict, String> {
+            Ok(JudgeVerdict { relation: rel, rationale: "r".into(), superseded_id: sid })
+        };
+        let sb = |id: i64| -> Option<i64> {
+            conn.query_row("SELECT superseded_by FROM log WHERE id=?1", params![id], |r| r.get(0)).unwrap()
+        };
+        let audit = |a: i64, b: i64| -> (i64, i64, String) {
+            conn.query_row(
+                "SELECT dry_run, applied, rationale FROM log_consolidation_audit WHERE kp_a=?1 AND kp_b=?2",
+                params![a, b],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, Option<String>>(2)?.unwrap_or_default())),
+            )
+            .unwrap()
+        };
+
+        // duplicate → older(ts) superseded by newer; newer live; applied, dry=0.
+        let d_old = seed_kp_with_ts(&conn, 1_000, "dup old");
+        let d_new = seed_kp_with_ts(&conn, 2_000, "dup new");
+        consolidate_pair(&conn, run_ts, d_old.min(d_new), d_old.max(d_new), 0.05, v(Relation::Duplicate, None), false).unwrap();
+        assert_eq!(sb(d_old), Some(d_new), "dup: older superseded by newer");
+        assert_eq!(sb(d_new), None, "dup: newer stays live");
+        assert_eq!(audit(d_old.min(d_new), d_old.max(d_new)), (0, 1, "r".into()), "dup audit dry=0 applied=1");
+
+        // supersede correct direction → older superseded.
+        let s_old = seed_kp_with_ts(&conn, 1_000, "sup old");
+        let s_new = seed_kp_with_ts(&conn, 3_000, "sup new");
+        consolidate_pair(&conn, run_ts, s_old.min(s_new), s_old.max(s_new), 0.4, v(Relation::Supersede, Some(s_old)), false).unwrap();
+        assert_eq!(sb(s_old), Some(s_new), "supersede: older replaced");
+        assert_eq!(sb(s_new), None);
+        assert_eq!(audit(s_old.min(s_new), s_old.max(s_new)).1, 1, "supersede applied");
+
+        // supersede WRONG direction (judge names the newer) → skip, both live, marked.
+        let w_old = seed_kp_with_ts(&conn, 1_000, "wrong old");
+        let w_new = seed_kp_with_ts(&conn, 4_000, "wrong new");
+        consolidate_pair(&conn, run_ts, w_old.min(w_new), w_old.max(w_new), 0.4, v(Relation::Supersede, Some(w_new)), false).unwrap();
+        assert_eq!(sb(w_old), None, "mismatch: both stay live");
+        assert_eq!(sb(w_new), None, "mismatch: both stay live");
+        let (_d, applied, rationale) = audit(w_old.min(w_new), w_old.max(w_new));
+        assert_eq!(applied, 0, "mismatch not applied");
+        assert!(rationale.contains("[apply skipped: judge/ts direction mismatch]"), "rationale marks mismatch: {rationale:?}");
+
+        // contradiction → log_contradiction edge linked to its audit row; no superseded_by.
+        let c1 = seed_kp_with_ts(&conn, 1_000, "contra a");
+        let c2 = seed_kp_with_ts(&conn, 1_000, "contra b");
+        consolidate_pair(&conn, run_ts, c1.min(c2), c1.max(c2), 0.6, v(Relation::Contradiction, None), false).unwrap();
+        let (cnt, linked): (i64, i64) = conn
+            .query_row(
+                "SELECT count(*), coalesce(max(lc.audit_id = a.id), 0) \
+                 FROM log_contradiction lc \
+                 JOIN log_consolidation_audit a ON a.kp_a=lc.id_a AND a.kp_b=lc.id_b \
+                 WHERE lc.id_a=?1 AND lc.id_b=?2",
+                params![c1.min(c2), c1.max(c2)],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(cnt, 1, "contradiction edge inserted");
+        assert_eq!(linked, 1, "log_contradiction.audit_id links to its audit row");
+        assert_eq!(sb(c1), None, "contradiction leaves superseded_by untouched");
+        assert_eq!(sb(c2), None);
+        assert_eq!(audit(c1.min(c2), c1.max(c2)).1, 1, "contradiction applied");
+
+        // referential integrity: survivor already superseded → skip, no chain.
+        let dead = seed_kp_with_ts(&conn, 5_000, "dead survivor");
+        conn.execute("UPDATE log SET superseded_by=?1 WHERE id=?2", params![d_new, dead]).unwrap();
+        let live_old = seed_kp_with_ts(&conn, 1_500, "older vs dead");
+        // duplicate(live_old, dead): newer=dead would be survivor, but it's not live.
+        consolidate_pair(&conn, run_ts, live_old.min(dead), live_old.max(dead), 0.05, v(Relation::Duplicate, None), false).unwrap();
+        assert_eq!(sb(live_old), None, "survivor-not-live: older stays live (no chain)");
+        let (_d2, ap2, rat2) = audit(live_old.min(dead), live_old.max(dead));
+        assert_eq!(ap2, 0, "not applied when survivor not live");
+        assert!(rat2.contains("[apply skipped: survivor no longer live]"), "marks survivor-not-live: {rat2:?}");
+
+        // referential integrity: loser already superseded → skip, first-survivor-wins.
+        // d_old was retired by d_new (the dup case). A later pair that would retire
+        // d_old AGAIN must skip WITHOUT overwriting its survivor pointer to z.
+        let z = seed_kp_with_ts(&conn, 6_000, "z newer");
+        consolidate_pair(&conn, run_ts, d_old.min(z), d_old.max(z), 0.05, v(Relation::Duplicate, None), false).unwrap();
+        assert_eq!(sb(d_old), Some(d_new), "first-survivor-wins: d_old still points at d_new (not overwritten)");
+        assert_eq!(sb(z), None, "loser-already-superseded: z untouched");
+        let (_d3, ap3, rat3) = audit(d_old.min(z), d_old.max(z));
+        assert_eq!(ap3, 0, "not applied when loser already superseded");
+        assert!(rat3.contains("[apply skipped: loser already superseded]"), "marks loser-already-superseded: {rat3:?}");
     }
 
     // S3s.C.1 — first ingest with new rows sets `last_growth_ts` to the
@@ -9391,6 +9764,38 @@ mod tests {
         .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, id_a);
+    }
+
+    // ==== D — superseded filtering ====
+
+    // S4w.D.1 — superseded rows are filtered from BOTH halves (FTS + KNN) before
+    // RRF: a row marked `superseded_by` never surfaces, the live survivors do,
+    // and the result is not emptied (over-fetch kept the live rows).
+    #[test]
+    fn s4w_d1_search_filters_superseded_rows() {
+        let (_tmp, db) = db_path();
+        let conn = open(&db).unwrap();
+        // All three FTS-match "keyword"; vectors put A nearest the query, then B, then C.
+        let id_a = seed_log_row(&conn, "a", Some("keyword alpha"));
+        let id_b = seed_log_row(&conn, "b", Some("keyword beta"));
+        let id_c = seed_log_row(&conn, "c", Some("keyword gamma"));
+        insert_log_vec(&conn, id_a, &vec_with_axes(&[(0, 1.0)]));
+        insert_log_vec(&conn, id_b, &vec_with_axes(&[(0, 0.9), (1, 0.1)]));
+        insert_log_vec(&conn, id_c, &vec_with_axes(&[(1, 1.0)]));
+        // Supersede A — the top hit on BOTH halves. It must vanish from search.
+        conn.execute("UPDATE log SET superseded_by=?1 WHERE id=?2", params![id_b, id_a]).unwrap();
+        drop(conn);
+
+        // Query embeds onto A's axis (A would be KNN rank 1 if not filtered).
+        let fake = FakeEmbedder::constant(1024, vec_with_axes(&[(0, 1.0)]));
+        let hits = block_on(search(&db, Some(&fake), "keyword", 10)).unwrap();
+        let ids: Vec<i64> = hits.iter().map(|h| h.id).collect();
+        assert!(!ids.contains(&id_a), "superseded row must not surface: {ids:?}");
+        assert!(
+            ids.contains(&id_b) && ids.contains(&id_c),
+            "live survivors present: {ids:?}"
+        );
+        assert_eq!(hits.len(), 2, "result not emptied — over-fetch kept the live rows: {ids:?}");
     }
 
     // ==== C — MemoryHit shape contract ====
