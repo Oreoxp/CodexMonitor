@@ -1769,12 +1769,15 @@ Your output should be exactly (a mechanical edit that just completed is an echo 
 // here. `dry_run=true` preserves the original preview behaviour (audit only,
 // zero mutation).
 //
-// The whole module is `#[allow(dead_code)]` as a unit: the background loop that
-// drives `consolidate_once` in production lands in S5-C-2. Until then these
-// items are exercised by Layer D (`corpus_layer_d_consolidate` /
-// `corpus_layer_d_apply`) + the apply / judge unit tests. Reuses the distiller's
-// wire layer (`HttpExtractor::post_chat`) — same model + creds, new prompt, no
-// new HTTP code.
+// The background loop now drives this in production (`run_consolidation_step` ←
+// `run_distill_loop`, kill-switched by `OPENCRAB_CONSOLIDATION_ENABLED`, fired
+// once `count_new_live >= consolidation_min_new_kps`). The module keeps
+// `#[allow(dead_code)]` only for the items still reached solely from tests —
+// the dry-run inspection surface (`dump_audit_tsv`) and the marker reader —
+// which are exercised by Layer D (`corpus_layer_d_consolidate` /
+// `corpus_layer_d_apply`) + the apply / judge / trigger unit tests. Reuses the
+// distiller's wire layer (`HttpExtractor::post_chat`) — same model + creds, new
+// prompt, no new HTTP code.
 // ===========================================================================
 #[allow(dead_code)]
 mod consolidate {
@@ -1997,6 +2000,137 @@ mod consolidate {
             .and_then(|s| s.trim().parse::<f64>().ok())
             .filter(|t| t.is_finite() && *t > 0.0)
             .unwrap_or(DEFAULT_CONSOLIDATION_T)
+    }
+
+    // ----- S5-C-2: background consolidation loop (kill switch + threshold) -----
+
+    /// Per-judge-call hard timeout for the background loop's apply pass — the
+    /// same 120s the Layer-D / unit tests use, named for reuse.
+    pub const JUDGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+    /// Default # of new LIVE KPs that must accrue since the last consolidation
+    /// run before the low-frequency loop fires again. Override with
+    /// `OPENCRAB_CONSOLIDATION_MIN_NEW_KPS`.
+    pub const CONSOLIDATION_MIN_NEW_KPS: i64 = 25;
+
+    /// Kill switch for the background consolidation step. Default OFF — the loop
+    /// only consolidates when `OPENCRAB_CONSOLIDATION_ENABLED` is "1"/"true"
+    /// (case-insensitive). Anything else (incl. unset / "0" / "false") → OFF.
+    /// Same env-reading shape as [`consolidation_distance_t`].
+    pub fn consolidation_enabled() -> bool {
+        parse_enabled_flag(std::env::var("OPENCRAB_CONSOLIDATION_ENABLED").ok().as_deref())
+    }
+
+    /// Pure truth table for the kill switch (split out so it's testable without
+    /// mutating process env): "1"/"true" (case-insensitive, trimmed) → true;
+    /// `None` / anything else (incl. "0"/"false"/garbage) → false.
+    pub fn parse_enabled_flag(v: Option<&str>) -> bool {
+        matches!(
+            v.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+            Some("1") | Some("true")
+        )
+    }
+
+    /// Effective trigger threshold (env override, else [`CONSOLIDATION_MIN_NEW_KPS`]).
+    pub fn consolidation_min_new_kps() -> i64 {
+        parse_min_new_kps(std::env::var("OPENCRAB_CONSOLIDATION_MIN_NEW_KPS").ok().as_deref())
+    }
+
+    /// Pure parse for the threshold env (testable without env mutation): a
+    /// positive integer overrides; `None` / non-positive / unparseable falls back
+    /// to [`CONSOLIDATION_MIN_NEW_KPS`].
+    pub fn parse_min_new_kps(v: Option<&str>) -> i64 {
+        v.and_then(|s| s.trim().parse::<i64>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(CONSOLIDATION_MIN_NEW_KPS)
+    }
+
+    /// Read the consolidation marker (the `MAX(log.id)` the last completed run
+    /// advanced to). A missing row (shouldn't happen post-v9) reads as 0.
+    pub fn consolidation_marker(conn: &Connection) -> Result<i64, BackendError> {
+        Ok(conn
+            .query_row(
+                "SELECT last_consolidation_max_log_id FROM consolidation_state WHERE id = 1",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0))
+    }
+
+    /// Count LIVE KPs (superseded_by IS NULL) newer than the consolidation
+    /// marker — the "new since last run" signal that gates the low-frequency
+    /// loop. Reads the marker via the same subquery the loop uses.
+    pub fn count_new_live(conn: &Connection) -> Result<i64, BackendError> {
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM log \
+             WHERE superseded_by IS NULL \
+               AND id > (SELECT last_consolidation_max_log_id FROM consolidation_state WHERE id = 1)",
+            [],
+            |r| r.get::<_, i64>(0),
+        )?)
+    }
+
+    /// Advance the consolidation marker to `max_id` (the `MAX(log.id)` snapshot
+    /// taken at the START of the run) and stamp `now_ms`. Using the START
+    /// snapshot is deliberate: KPs the MCP side writes via `log_progress` DURING
+    /// the (possibly minutes-long) judge pass get a fresh `id > max_id`, so they
+    /// are counted in the NEXT round rather than silently skipped.
+    pub fn advance_consolidation_marker(
+        conn: &Connection,
+        max_id: i64,
+        now_ms: i64,
+    ) -> Result<(), BackendError> {
+        conn.execute(
+            "UPDATE consolidation_state \
+             SET last_consolidation_max_log_id = ?1, last_consolidation_ts = ?2 \
+             WHERE id = 1",
+            params![max_id, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// One consolidation gate-check + (threshold met) a real apply pass. Called
+    /// ONLY when [`consolidation_enabled`] is true (the loop gates on that first,
+    /// so a disabled loop never touches this). Snapshots `MAX(log.id)` at the
+    /// START (see [`advance_consolidation_marker`]); no-op when fewer than
+    /// [`consolidation_min_new_kps`] new LIVE KPs have accrued. With no embedder
+    /// the store has no `log_vec` rows → `find_candidates` yields nothing →
+    /// `consolidate_once` writes nothing (safe). NEVER writes a TSV (that is the
+    /// dry-run inspection surface only). `consolidate_once` is `!Send` and needs
+    /// the time driver — fine on the distill thread's current_thread+enable_all rt.
+    pub async fn run_consolidation_step(
+        conn: &Connection,
+        extractor: &HttpExtractor,
+    ) -> Result<(), BackendError> {
+        let max_id: i64 =
+            conn.query_row("SELECT COALESCE(MAX(id), 0) FROM log", [], |r| r.get(0))?;
+        let new_live = count_new_live(conn)?;
+        let threshold = consolidation_min_new_kps();
+        if new_live < threshold {
+            return Ok(()); // not enough new memory yet — stay quiet.
+        }
+
+        let count = |sql: &str| -> Result<i64, BackendError> {
+            Ok(conn.query_row(sql, [], |r| r.get::<_, i64>(0))?)
+        };
+        let before_superseded = count("SELECT COUNT(*) FROM log WHERE superseded_by IS NOT NULL")?;
+        let before_contra = count("SELECT COUNT(*) FROM log_contradiction")?;
+
+        let t = consolidation_distance_t();
+        let candidates = consolidate_once(conn, extractor, t, JUDGE_TIMEOUT, false).await?;
+
+        let merged = count("SELECT COUNT(*) FROM log WHERE superseded_by IS NOT NULL")? - before_superseded;
+        let contradictions = count("SELECT COUNT(*) FROM log_contradiction")? - before_contra;
+
+        // Advance with the START snapshot, AFTER the pass completed.
+        advance_consolidation_marker(conn, max_id, current_time_ms())?;
+
+        eprintln!(
+            "[consolidate] ran: {candidates} candidate(s) judged, {merged} merged, \
+             {contradictions} contradiction(s) (new_live={new_live} >= {threshold}, marker→{max_id})"
+        );
+        Ok(())
     }
 
     /// Neighbours fetched per live KP when sweeping for candidates. In a dense
@@ -3350,6 +3484,17 @@ pub async fn run_distill_loop(
             }
         }
 
+        // Low-frequency consolidation (kill-switched, default OFF). Disabled →
+        // not touched at all. When enabled, the step itself no-ops until enough
+        // new LIVE KPs have accrued (see `run_consolidation_step`). Same conn +
+        // thread; `consolidate_once` is `!Send` + needs the time driver, both of
+        // which this loop's runtime has. Failures are logged; the loop continues.
+        if consolidation_enabled() {
+            if let Err(e) = run_consolidation_step(&conn, &extractor).await {
+                eprintln!("[consolidate] step failed: {e}");
+            }
+        }
+
         tokio::time::sleep(DISTILL_POLL_INTERVAL).await;
     }
 }
@@ -3361,7 +3506,7 @@ pub async fn run_distill_loop(
 /// Schema version this binary writes. The DB file records its current
 /// schema in `PRAGMA user_version`; `migrate` advances it one step at a
 /// time up to this value.
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 /// Bring `conn`'s schema up to [`SCHEMA_VERSION`].
 ///
@@ -3592,6 +3737,29 @@ fn apply_migration_step(tx: &rusqlite::Transaction<'_>, target: i64) -> Result<(
                  applied       INTEGER NOT NULL
              );
              PRAGMA user_version = 8;",
+        )?,
+        9 => tx.execute_batch(
+            // v9 (consolidation loop): a single-row cursor table for the
+            // low-frequency background consolidation pass. Pure-add — nothing in
+            // v8 is touched. The recon confirmed the store had NO consolidation-
+            // dimension marker (all existing cursors live on `raw_thread` and are
+            // per-thread ingest/distill cursors); consolidation is a whole-store,
+            // cross-thread, live-KP-counted pass, so it needs its own global cursor.
+            //
+            // `consolidation_state` is a singleton (`CHECK (id = 1)`): one row
+            // holds the high-water mark `last_consolidation_max_log_id` (the
+            // `MAX(log.id)` snapshot the last completed run advanced to) plus
+            // `last_consolidation_ts`. The loop fires only once
+            // `COUNT(live KP with id > last_consolidation_max_log_id) >= M`.
+            // `INSERT OR IGNORE` seeds the row at 0 so a fresh DB consolidates
+            // once enough KPs accrue, and a re-run is a no-op (row already there).
+            "CREATE TABLE IF NOT EXISTS consolidation_state (
+                 id                            INTEGER PRIMARY KEY CHECK (id = 1),
+                 last_consolidation_max_log_id INTEGER NOT NULL DEFAULT 0,
+                 last_consolidation_ts         INTEGER
+             );
+             INSERT OR IGNORE INTO consolidation_state (id, last_consolidation_max_log_id) VALUES (1, 0);
+             PRAGMA user_version = 9;",
         )?,
         _ => unreachable!("no migration step defined for v{target} — add an arm"),
     }
@@ -5685,32 +5853,32 @@ mod tests {
         assert!(!zh.is_empty(), "trigram + rebuild: Chinese detail must be FTS-recallable");
     }
 
-    // T2 — v0 → … → v8 full chain ends at v8 with all core products + trigram
-    // + 1024 + the consolidation (v8) objects.
+    // T2 — v0 → … → v9 full chain ends at v9 with all core products + trigram
+    // + 1024 + the consolidation (v8) objects + the v9 consolidation cursor.
     #[test]
-    fn v0_to_v8_full_chain() {
+    fn v0_to_v9_full_chain() {
         let (_tmp, db) = db_path();
         build_v0_db(&db);
         let conn = open(&db).unwrap();
-        // read_user_version == SCHEMA_VERSION is the invariant (currently 8).
+        // read_user_version == SCHEMA_VERSION is the invariant (currently 9).
         assert_eq!(read_user_version(&conn), SCHEMA_VERSION);
         assert!(schema_object_exists(&conn, "table", "raw_event"));
         assert!(schema_object_exists(&conn, "table", "raw_thread"));
         assert!(schema_object_exists(&conn, "table", "log_vec"));
-        assert!(log_fts_ddl(&conn).contains("trigram"), "v0→v8 chain: log_fts trigram");
-        assert!(log_vec_ddl(&conn).contains("float[1024]"), "v0→v8 chain: log_vec 1024");
+        assert!(log_fts_ddl(&conn).contains("trigram"), "v0→v9 chain: log_fts trigram");
+        assert!(log_vec_ddl(&conn).contains("float[1024]"), "v0→v9 chain: log_vec 1024");
         // consolidation (v8) products:
         assert!(
             log_columns(&conn).contains("superseded_by"),
-            "v0→v8 chain: log.superseded_by"
+            "v0→v9 chain: log.superseded_by"
         );
         assert!(
             schema_object_exists(&conn, "table", "log_contradiction"),
-            "v0→v8 chain: log_contradiction"
+            "v0→v9 chain: log_contradiction"
         );
         assert!(
             schema_object_exists(&conn, "table", "log_consolidation_audit"),
-            "v0→v8 chain: log_consolidation_audit"
+            "v0→v9 chain: log_consolidation_audit"
         );
         // audit carries the judge's supersede direction (superseded_id).
         let audit_cols: std::collections::BTreeSet<String> = {
@@ -5724,8 +5892,21 @@ mod tests {
         };
         assert!(
             audit_cols.contains("superseded_id"),
-            "v0→v8 chain: audit must carry superseded_id; cols={audit_cols:?}"
+            "v0→v9 chain: audit must carry superseded_id; cols={audit_cols:?}"
         );
+        // consolidation loop cursor (v9): the singleton row exists, seeded at 0.
+        assert!(
+            schema_object_exists(&conn, "table", "consolidation_state"),
+            "v0→v9 chain: consolidation_state"
+        );
+        let (cnt, max_id): (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(MIN(last_consolidation_max_log_id), -1) FROM consolidation_state",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((cnt, max_id), (1, 0), "v0→v9 chain: one consolidation_state row seeded at 0");
     }
 
     // T3 — re-open a v7 DB: migrate is a no-op, log_fts stays trigram, version stable.
@@ -5991,6 +6172,210 @@ mod tests {
             entry.detail.as_deref(),
             Some("Refactored the OAuth middleware to use the new token model.")
         );
+    }
+
+    // ---- consolidation loop cursor (v9) — consolidation_state ----
+    //
+    // Pure-add step (see the v9 arm in `apply_migration_step`): a single-row
+    // global cursor for the low-frequency background consolidation pass. The
+    // from-state for v8→v9 is V8_DDL_FROZEN — V7_DDL_FROZEN copied verbatim with
+    // the THREE deltas the v8 migration applies (log.superseded_by column +
+    // log_contradiction + log_consolidation_audit), so the frozen constant can't
+    // drift off the real shipped v8 shape and falsely pass.
+    const V8_DDL_FROZEN: &str = "CREATE TABLE log (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts            INTEGER NOT NULL,
+        summary       TEXT    NOT NULL,
+        detail        TEXT,
+        origin        TEXT    NOT NULL DEFAULT 'self',
+        project_hash  TEXT,
+        kind          TEXT,
+        superseded_by INTEGER REFERENCES log(id)
+    );
+    CREATE VIRTUAL TABLE log_fts USING fts5(detail, content='log', content_rowid='id', tokenize='trigram');
+    CREATE TRIGGER log_ai AFTER INSERT ON log BEGIN
+        INSERT INTO log_fts(rowid, detail) VALUES (new.id, new.detail);
+    END;
+    CREATE TRIGGER log_ad AFTER DELETE ON log BEGIN
+        INSERT INTO log_fts(log_fts, rowid, detail) VALUES('delete', old.id, old.detail);
+    END;
+    CREATE TRIGGER log_au AFTER UPDATE ON log BEGIN
+        INSERT INTO log_fts(log_fts, rowid, detail) VALUES('delete', old.id, old.detail);
+        INSERT INTO log_fts(rowid, detail) VALUES (new.id, new.detail);
+    END;
+    CREATE INDEX idx_log_ts ON log(ts);
+    CREATE TABLE raw_thread (
+        thread_id        TEXT PRIMARY KEY,
+        agent_id         TEXT,
+        team_id          TEXT,
+        project_hash     TEXT,
+        source           TEXT,
+        parent_thread_id TEXT,
+        cwd              TEXT,
+        source_path      TEXT NOT NULL,
+        first_seen_ts    INTEGER NOT NULL,
+        last_ingest_ts   INTEGER NOT NULL,
+        last_offset      INTEGER NOT NULL DEFAULT 0,
+        last_line_no     INTEGER NOT NULL DEFAULT 0,
+        last_distilled_line_no INTEGER NOT NULL DEFAULT 0,
+        last_growth_ts   INTEGER
+    );
+    CREATE TABLE raw_event (
+        id          INTEGER PRIMARY KEY,
+        thread_id   TEXT NOT NULL REFERENCES raw_thread(thread_id),
+        line_no     INTEGER NOT NULL,
+        payload     TEXT NOT NULL,
+        ingested_at INTEGER NOT NULL,
+        UNIQUE(thread_id, line_no)
+    );
+    CREATE INDEX idx_raw_event_thread ON raw_event(thread_id);
+    CREATE VIRTUAL TABLE log_vec USING vec0(embedding float[1024]);
+    CREATE TABLE log_contradiction (
+        id_a     INTEGER NOT NULL,
+        id_b     INTEGER NOT NULL,
+        audit_id INTEGER,
+        PRIMARY KEY (id_a, id_b)
+    );
+    CREATE TABLE log_consolidation_audit (
+        id            INTEGER PRIMARY KEY,
+        run_ts        INTEGER NOT NULL,
+        kp_a          INTEGER NOT NULL,
+        kp_b          INTEGER NOT NULL,
+        distance      REAL,
+        relation      TEXT    NOT NULL,
+        action        TEXT    NOT NULL,
+        rationale     TEXT,
+        superseded_id INTEGER,
+        dry_run       INTEGER NOT NULL,
+        applied       INTEGER NOT NULL
+    );";
+
+    // V9.1 — v8→v9: consolidation_state appears, seeded with ONE row (id=1) at
+    // the initial high-water 0 / NULL ts. Existing v8 objects are untouched.
+    #[test]
+    fn v8_to_v9_migrate() {
+        let (_tmp, db) = db_path();
+        ensure_vec_extension(); // V8_DDL_FROZEN has a vec0 table (raw open)
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        {
+            let conn = Connection::open(&db).unwrap();
+            let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0)).unwrap();
+            conn.execute_batch(V8_DDL_FROZEN).unwrap();
+            conn.execute_batch("PRAGMA user_version = 8;").unwrap();
+            assert_eq!(read_user_version(&conn), 8);
+            assert!(
+                !schema_object_exists(&conn, "table", "consolidation_state"),
+                "v8 precondition: no consolidation_state yet"
+            );
+        }
+        let conn = open(&db).unwrap();
+        assert_eq!(read_user_version(&conn), SCHEMA_VERSION); // 9
+        assert!(
+            schema_object_exists(&conn, "table", "consolidation_state"),
+            "v9 adds consolidation_state"
+        );
+        let cnt: i64 = conn
+            .query_row("SELECT COUNT(*) FROM consolidation_state", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cnt, 1, "exactly one consolidation_state row");
+        let (id, max_id, ts): (i64, i64, Option<i64>) = conn
+            .query_row(
+                "SELECT id, last_consolidation_max_log_id, last_consolidation_ts FROM consolidation_state",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(id, 1, "the singleton id is 1");
+        assert_eq!(max_id, 0, "initial high-water is 0");
+        assert!(ts.is_none(), "initial last_consolidation_ts is NULL");
+    }
+
+    // V9.2 — re-open a v9 DB repeatedly: migrate is a no-op (INSERT OR IGNORE
+    // keeps the single seed row; version stable; no duplicate row).
+    #[test]
+    fn v9_migrate_idempotent() {
+        let (_tmp, db) = db_path();
+        for _ in 0..3 {
+            let conn = open(&db).unwrap();
+            assert_eq!(read_user_version(&conn), SCHEMA_VERSION);
+            let cnt: i64 = conn
+                .query_row("SELECT COUNT(*) FROM consolidation_state", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(cnt, 1, "INSERT OR IGNORE keeps exactly one row across reopens");
+        }
+    }
+
+    // ---- S5-C-2 loop trigger: count_new_live / advance marker / kill switch ----
+
+    // S5C2.A — count_new_live counts ONLY live KPs with id > marker; advancing
+    // the marker (to a start-snapshot max_id) moves it + stamps ts.
+    #[test]
+    fn consolidation_trigger_counts_new_live_past_marker() {
+        let (_tmp, db) = db_path();
+        let conn = open(&db).unwrap();
+        // 5 KPs (ids 1..=5); supersede #2 and #4 → live = {1,3,5}.
+        let ids: Vec<i64> = (1..=5)
+            .map(|i| seed_kp_with_ts(&conn, 1_000 + i, &format!("kp{i}")))
+            .collect();
+        conn.execute("UPDATE log SET superseded_by=?1 WHERE id=?2", params![ids[0], ids[1]]).unwrap();
+        conn.execute("UPDATE log SET superseded_by=?1 WHERE id=?2", params![ids[2], ids[3]]).unwrap();
+
+        // marker 0 (fresh): the 3 live KPs.
+        assert_eq!(count_new_live(&conn).unwrap(), 3, "marker 0 counts the 3 live KPs");
+
+        // advance to id=3: live KPs with id>3 → only id 5 (id 4 is dead → excluded).
+        advance_consolidation_marker(&conn, ids[2], 12_345).unwrap();
+        assert_eq!(consolidation_marker(&conn).unwrap(), ids[2], "marker == passed max_id");
+        assert_eq!(count_new_live(&conn).unwrap(), 1, "only live id>3 counts; dead id 4 excluded");
+        let ts: Option<i64> = conn
+            .query_row("SELECT last_consolidation_ts FROM consolidation_state WHERE id=1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ts, Some(12_345), "advance stamps last_consolidation_ts");
+
+        // advance to the top → nothing new.
+        advance_consolidation_marker(&conn, ids[4], 12_346).unwrap();
+        assert_eq!(count_new_live(&conn).unwrap(), 0, "marker at top: nothing new");
+    }
+
+    // S5C2.B — the trigger predicate (new_live >= threshold) flips exactly at the
+    // default threshold. Uses the const directly (no env), so it's deterministic.
+    #[test]
+    fn consolidation_trigger_threshold_gate() {
+        let (_tmp, db) = db_path();
+        let conn = open(&db).unwrap();
+        for i in 0..(CONSOLIDATION_MIN_NEW_KPS - 1) {
+            seed_kp_with_ts(&conn, 1_000 + i, &format!("kp{i}"));
+        }
+        let n = count_new_live(&conn).unwrap();
+        assert_eq!(n, CONSOLIDATION_MIN_NEW_KPS - 1);
+        assert!(n < CONSOLIDATION_MIN_NEW_KPS, "below threshold → loop would NOT fire");
+        seed_kp_with_ts(&conn, 9_999, "kp_last");
+        let n2 = count_new_live(&conn).unwrap();
+        assert_eq!(n2, CONSOLIDATION_MIN_NEW_KPS);
+        assert!(n2 >= CONSOLIDATION_MIN_NEW_KPS, "at threshold → loop WOULD fire");
+    }
+
+    // S5C2.C — kill-switch + threshold env truth tables (pure parsers, no env
+    // mutation → no parallel-test flakiness).
+    #[test]
+    fn consolidation_env_parsers_truth_table() {
+        // kill switch: ONLY "1"/"true" (trimmed, case-insensitive) enable.
+        assert!(parse_enabled_flag(Some("1")));
+        assert!(parse_enabled_flag(Some("true")));
+        assert!(parse_enabled_flag(Some("TRUE")));
+        assert!(parse_enabled_flag(Some("  true  ")));
+        assert!(!parse_enabled_flag(None), "unset → OFF (default kill switch)");
+        assert!(!parse_enabled_flag(Some("0")));
+        assert!(!parse_enabled_flag(Some("false")));
+        assert!(!parse_enabled_flag(Some("yes")));
+        assert!(!parse_enabled_flag(Some("")));
+        // threshold: a positive int overrides; else fall back to the default const.
+        assert_eq!(parse_min_new_kps(Some("5")), 5);
+        assert_eq!(parse_min_new_kps(Some("  42 ")), 42);
+        assert_eq!(parse_min_new_kps(None), CONSOLIDATION_MIN_NEW_KPS);
+        assert_eq!(parse_min_new_kps(Some("0")), CONSOLIDATION_MIN_NEW_KPS, "non-positive → default");
+        assert_eq!(parse_min_new_kps(Some("-3")), CONSOLIDATION_MIN_NEW_KPS);
+        assert_eq!(parse_min_new_kps(Some("abc")), CONSOLIDATION_MIN_NEW_KPS);
     }
 
     // ---- consolidation (v8) judge parser + candidate finding (deterministic) ----
