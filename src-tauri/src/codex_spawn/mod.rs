@@ -337,6 +337,19 @@ pub(crate) fn build_memory_mcp_server_entry(
     Ok(serde_json::json!({
         "command": binary_path.display().to_string(),
         "args": ["--agent-id", agent_id],
+        // P6-hang-9 fix — the per-agent memory tools (`log_progress` /
+        // `memory_search` / `memory_get`) are agent infrastructure over the
+        // agent's OWN `~/.opencrab/agents/<id>/memory.db`: they touch no user
+        // files and must never block on human-in-the-loop approval. Without
+        // this, a non-`full-access` turn drops out of the `Never +
+        // danger-full-access` posture, `mcp_permission_prompt_is_auto_approved`
+        // returns false, and the call wedges forever at the MCP approval gate
+        // (a background agent has no one to answer; `Never` never surfaces a
+        // prompt). `approve` = `AppToolApproval::Approve`, the per-server default
+        // that hits `mcp_permission_prompt_is_auto_approved` condition (1) and
+        // short-circuits BEFORE the policy/sandbox/access_mode check. Scoped to
+        // THIS server only (keyed on the `opencrab-memory` name).
+        "default_tools_approval_mode": "approve",
     }))
 }
 
