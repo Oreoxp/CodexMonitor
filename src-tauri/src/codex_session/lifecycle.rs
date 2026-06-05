@@ -437,6 +437,41 @@ async fn dispatch_notification<E: EventSink>(
         if let Some(ref tid) = thread_id {
             routing.forget_thread_workspace_mapping(tid).await;
             routing.forget_hidden_thread(tid).await;
+            // Phase 7 S1 — drop any turn-state for an archived thread so a
+            // thread torn down mid-turn can't leave a stale entry behind.
+            routing.clear_turn_active(tid, None).await;
+        }
+    }
+
+    // Phase 7 S1 write② — per-thread turn-state bookkeeping. `turn/completed`
+    // is codex's SOLE terminal turn notification (abort/failure fold into it
+    // via `params.turn.status`), so this one arm covers completed | interrupted
+    // | failed. Reconcile by `turn.id` so a late completion from a superseded
+    // turn can't clear a freshly started one. A non-retryable `error` is a
+    // belt-and-suspenders clear (it carries no turn id → unconditional). Runs
+    // for every thread (team + normal mode), symmetric with write① in
+    // `send_user_message_core`; a clear for a thread never set is a no-op.
+    if let Some(ref tid) = thread_id {
+        match method_name {
+            Some("turn/completed") => {
+                let completed_turn_id = value
+                    .get("params")
+                    .and_then(|p| p.get("turn"))
+                    .and_then(|t| t.get("id"))
+                    .and_then(|id| id.as_str());
+                routing.clear_turn_active(tid, completed_turn_id).await;
+            }
+            Some("error") => {
+                let will_retry = value
+                    .get("params")
+                    .and_then(|p| p.get("willRetry"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                if !will_retry {
+                    routing.clear_turn_active(tid, None).await;
+                }
+            }
+            _ => {}
         }
     }
 

@@ -66,6 +66,13 @@ pub(crate) struct AppState {
     /// never `.await` while holding it. Lazily populated by
     /// `events::get_or_create_event_log`.
     pub(crate) event_logs: std::sync::Mutex<HashMap<(String, String), Arc<EventLog>>>,
+    /// Phase 7 S1 — `thread_id → Alarm` pending self-wakes (agent
+    /// self-scheduling). `std` mutex (sync; quick insert/remove/snapshot, never
+    /// `.await` while held) like `event_logs`. In-memory: lost on restart
+    /// (pending wakes stop; the thread waits for a human poke). Armed by
+    /// `parse_alarm_tags` in the team router, fired by the background scheduler
+    /// (`crate::alarm::run_alarm_scheduler`).
+    pub(crate) alarms: std::sync::Mutex<HashMap<String, crate::alarm::Alarm>>,
 }
 
 impl AppState {
@@ -99,6 +106,7 @@ impl AppState {
             codex_login_cancels: Mutex::new(HashMap::new()),
             tcp_daemon: Mutex::new(TcpDaemonRuntime::default()),
             event_logs: std::sync::Mutex::new(HashMap::new()),
+            alarms: std::sync::Mutex::new(HashMap::new()),
         }
     }
 }

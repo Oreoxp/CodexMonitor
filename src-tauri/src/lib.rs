@@ -6,8 +6,10 @@ use tauri::RunEvent;
 #[cfg(target_os = "macos")]
 use tauri::WindowEvent;
 
+mod alarm;
 mod backend;
 mod bootstrap;
+mod chats;
 mod codex;
 mod codex_session;
 mod codex_spawn;
@@ -40,6 +42,7 @@ mod storage;
 mod tailscale;
 mod tasks;
 mod team_config;
+mod team_mcp_binary;
 #[cfg(desktop)]
 mod terminal;
 #[cfg(not(desktop))]
@@ -148,6 +151,13 @@ pub fn run() {
         .setup(|app| {
             let state = state::AppState::load(&app.handle());
             app.manage(state);
+            // Phase 7 S1 — background alarm scheduler (agent self-scheduling).
+            // Single task for the process lifetime; fires due+idle pending
+            // wakes armed by `<alarm>` tags. See `crate::alarm`.
+            {
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(crate::alarm::run_alarm_scheduler(app_handle));
+            }
             // Silently fix any historical config.toml that codex would
             // refuse to parse (e.g. legacy `wire_api = "chat"`,
             // `name = ""`). This keeps "Failed to start a local thread."
@@ -256,11 +266,13 @@ pub fn run() {
             tasks::approve_task,
             tasks::reject_task,
             tasks::update_task,
+            chats::list_thread_chats,
             events::list_team_events,
             codex::start_thread,
             codex::send_user_message,
             codex::turn_steer,
             codex::turn_interrupt,
+            codex::interrupt_thread,
             codex::start_review,
             codex::respond_to_server_request,
             codex::remember_approval_rule,

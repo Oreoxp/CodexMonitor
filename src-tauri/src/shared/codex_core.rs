@@ -538,6 +538,10 @@ pub(crate) async fn send_user_message_core(
 
     let input = build_turn_input_items(text, images, app_mentions)?;
 
+    // Phase 7 S1 write① — snapshot the thread id before `params` consumes it,
+    // so we can record the started turn into per-thread turn-state below.
+    let turn_state_thread_id = thread_id.clone();
+
     let mut params = Map::new();
     params.insert("threadId".to_string(), json!(thread_id));
     params.insert("input".to_string(), json!(input));
@@ -552,9 +556,27 @@ pub(crate) async fn send_user_message_core(
             params.insert("collaborationMode".to_string(), mode);
         }
     }
-    session
+    let response = session
         .send_request_for_workspace(&workspace_id, "turn/start", Value::Object(params))
-        .await
+        .await?;
+    // Phase 7 S1 write① — the `turn/start` ack carries `result.turn.id`. Record
+    // it so the escape hatch (`interrupt_thread_core`) and the future alarm
+    // idle-check have a host-side source of truth for this thread's active turn.
+    // This is the turn/start convergence point for every agent/team/system/wake
+    // turn; `run_background_prompt_core` (hidden ephemeral aux threads) bypasses
+    // it on purpose — those self-drain + archive and are never interrupted.
+    if let Some(turn_id) = response
+        .get("result")
+        .and_then(|r| r.get("turn"))
+        .and_then(|t| t.get("id"))
+        .and_then(|id| id.as_str())
+    {
+        session
+            .routing
+            .set_turn_active(turn_state_thread_id, turn_id.to_string())
+            .await;
+    }
+    Ok(response)
 }
 
 pub(crate) async fn turn_steer_core(
@@ -602,6 +624,34 @@ pub(crate) async fn turn_interrupt_core(
     session
         .send_request_for_workspace(&workspace_id, "turn/interrupt", params)
         .await
+}
+
+/// Phase 7 S1 — system-initiated escape hatch. Unlike `turn_interrupt_core`
+/// (which the UI calls with a turn id the frontend tracked), this resolves the
+/// active turn id from host-side per-thread turn-state, so background-initiated
+/// stops (and the future supervisor / alarm) can interrupt without a human in
+/// the loop supplying the id. No active turn ⇒ no-op (`Ok(false)`); an
+/// interrupt was sent ⇒ `Ok(true)`.
+///
+/// Gate 1: a bare `turn/interrupt` stops the turn WITHOUT spawning a
+/// replacement and reaps the running tool's process group; do NOT enable
+/// `multi_agent_v2` (its `trigger_turn` mailbox would auto-spawn a follow-up
+/// turn after the interrupt).
+pub(crate) async fn interrupt_thread_core(
+    sessions: &Mutex<HashMap<String, Arc<WorkspaceSession>>>,
+    workspace_id: String,
+    thread_id: String,
+) -> Result<bool, String> {
+    let session = get_session_clone(sessions, &workspace_id).await?;
+    // Entry presence ⇒ active (`clear_turn_active` removes on terminal events),
+    // so `current_turn_id` is the single gate.
+    match session.routing.current_turn_id(&thread_id).await {
+        Some(turn_id) => {
+            turn_interrupt_core(sessions, workspace_id, thread_id, turn_id).await?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
 }
 
 pub(crate) async fn start_review_core(
@@ -924,6 +974,54 @@ pub(crate) async fn get_config_model_core(
 mod tests {
     use super::*;
     use serde_json::Value;
+
+    // Phase 7 S1 — a `WorkspaceSession` with no rpc/transport. Enough to drive
+    // `interrupt_thread_core`'s gating: the idle branch never touches rpc; the
+    // active branch routes into `turn_interrupt_core`, which then fails at the
+    // (absent) transport — that failure is exactly what proves the interrupt
+    // branch was taken (vs the `Ok(false)` no-op).
+    fn test_session() -> Arc<WorkspaceSession> {
+        Arc::new(WorkspaceSession {
+            codex_args: None,
+            child: None,
+            stdin: None,
+            transport: None,
+            rpc: None,
+            routing: crate::codex_session::SessionRouting::new("ws-1".to_string()),
+        })
+    }
+
+    #[tokio::test]
+    async fn interrupt_thread_core_no_op_when_idle() {
+        let session = test_session();
+        let sessions = Mutex::new(HashMap::from([("ws-1".to_string(), session)]));
+
+        // No turn-state recorded ⇒ nothing to interrupt ⇒ no-op, rpc untouched.
+        let result =
+            interrupt_thread_core(&sessions, "ws-1".to_string(), "thread-1".to_string()).await;
+        assert_eq!(result, Ok(false));
+    }
+
+    #[tokio::test]
+    async fn interrupt_thread_core_routes_to_interrupt_when_active() {
+        let session = test_session();
+        session
+            .routing
+            .set_turn_active("thread-1".to_string(), "turn-9".to_string())
+            .await;
+        let sessions = Mutex::new(HashMap::from([("ws-1".to_string(), session)]));
+
+        // Active ⇒ routes into `turn_interrupt_core`, which needs rpc; with
+        // `rpc: None` it errors at the transport layer — proving the interrupt
+        // branch was taken rather than the no-op branch.
+        let result =
+            interrupt_thread_core(&sessions, "ws-1".to_string(), "thread-1".to_string()).await;
+        let err = result.expect_err("active turn should route into turn_interrupt_core");
+        assert!(
+            err.contains("rpc"),
+            "expected transport/rpc error, got: {err}"
+        );
+    }
 
     #[test]
     fn normalize_strips_file_uri_prefix() {

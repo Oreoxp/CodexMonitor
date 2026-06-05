@@ -304,6 +304,65 @@ impl TeamRouters {
         }
         new_text
     }
+
+    /// S6-3a — record one human team message into the `chats` render-DB
+    /// (`kind=user_input`). Producer side of chats user-input; the structured
+    /// agent side lives in `process_team_tool_calls` (S6-2). Best-effort and
+    /// **team threads only**: the same lookup as `prepend_prelude_if_stale`
+    /// bails when this is not a team workspace / not a team thread, so normal
+    /// solo chats never enter `chats`. Called from the human-input Tauri
+    /// command (`codex::send_user_message`).
+    pub(crate) async fn record_user_chat_best_effort(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        text: &str,
+    ) {
+        let (shared, agent_id) = {
+            let guard = self.inner.lock().await;
+            let Some(router) = guard.get(workspace_id) else {
+                return;
+            };
+            let Some(agent) = router.shared.by_thread.get(thread_id) else {
+                return;
+            };
+            (router.shared.clone(), agent.id.clone())
+        };
+        let chat = build_user_input_chat(
+            &shared.workspace_id,
+            &shared.team_id,
+            thread_id,
+            &agent_id,
+            text,
+            &chrono::Utc::now().to_rfc3339(),
+        );
+        append_chat_best_effort(&shared, chat).await;
+    }
+}
+
+/// Build the `kind=user_input` chats row for a human team message: the user
+/// sent `content` into `agent_id`'s thread, so it is recorded under that
+/// thread with `recipient = agent_id` (mirrors how an agent's own
+/// `send_message` row is keyed in `decide_send_message`). Pure, for testing.
+fn build_user_input_chat(
+    workspace_id: &str,
+    team_id: &str,
+    thread_id: &str,
+    agent_id: &str,
+    content: &str,
+    ts: &str,
+) -> crate::chats::store::NewChat {
+    crate::chats::store::NewChat {
+        workspace_id: workspace_id.to_string(),
+        team_id: team_id.to_string(),
+        thread_id: Some(thread_id.to_string()),
+        sender: USER_PUBLISHER.to_string(),
+        recipient: Some(agent_id.to_string()),
+        role: None,
+        kind: crate::chats::store::ChatKind::UserInput,
+        content: content.to_string(),
+        ts: ts.to_string(),
+    }
 }
 
 struct SharedRouterState {
@@ -427,6 +486,10 @@ fn spawn_consumer(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut buf = String::new();
+        // S6-2 (dormant): structured opencrab-team tool calls observed during
+        // this turn, flushed at turn/completed. Always empty until S6-3
+        // registers the team MCP server.
+        let mut tool_calls: Vec<TeamToolCall> = Vec::new();
         loop {
             let Some(event) = rx.recv().await else {
                 // Channel closed — sidecar restarted the router (or workspace
@@ -469,9 +532,15 @@ fn spawn_consumer(
                                 .unwrap_or_else(|| "null".to_string())
                         );
                         buf.clear();
+                        tool_calls.clear();
                     } else {
                         let final_text = std::mem::take(&mut buf);
                         process_final_text(&shared, &thread_id, &final_text).await;
+                        // S6-2 (dormant): flush structured tool calls observed
+                        // this turn. Empty until S6-3 registers the team MCP
+                        // server, so this is a no-op in production today.
+                        let turn_tool_calls = std::mem::take(&mut tool_calls);
+                        process_team_tool_calls(&shared, &thread_id, turn_tool_calls).await;
                     }
                 }
                 "error" => {
@@ -496,6 +565,7 @@ fn spawn_consumer(
                     );
                     if !will_retry {
                         buf.clear();
+                        tool_calls.clear();
                     }
                 }
                 "turn/error" => {
@@ -511,6 +581,7 @@ fn spawn_consumer(
                         thread_id, payload
                     );
                     buf.clear();
+                    tool_calls.clear();
                 }
                 "thread/compacted" => {
                     // Phase 6 — Block C re-injection trigger. Codex compacted
@@ -520,6 +591,14 @@ fn spawn_consumer(
                     // contract). See `mark_prelude_stale_on_compaction` for
                     // the load-bearing state op + the wider Block C contract.
                     mark_prelude_stale_on_compaction(&shared.prelude_dates, &thread_id).await;
+                }
+                "item/completed" => {
+                    // S6-2 (dormant): buffer structured opencrab-team tool
+                    // calls for flush at turn/completed. Non-team item/completed
+                    // events return None and are ignored exactly as before.
+                    if let Some(tc) = parse_team_tool_call(&event) {
+                        tool_calls.push(tc);
+                    }
                 }
                 _ => {}
             }
@@ -638,6 +717,28 @@ async fn process_final_text(shared: &SharedRouterState, sender_thread: &str, tex
         // Tap fired for an unknown thread — nothing we can do with it.
         return;
     };
+
+    // Phase 7 S1 — agent self-scheduling. A `<alarm>` re-arms this thread's
+    // pending self-wake (one per thread; the last `<alarm>` of the turn wins).
+    // Independent of send_message ACL — an alarm only targets the sender's own
+    // thread — so it is processed even when the approval-gate below drops the
+    // turn's send_message tags. The background scheduler fires it once the
+    // thread is idle (see `crate::alarm`).
+    let parsed_alarms = crate::alarm::parse_alarm_tags(text);
+    if !parsed_alarms.is_empty() {
+        let state = shared.app_handle.state::<AppState>();
+        let mut reg = state.alarms.lock().expect("alarms mutex poisoned");
+        for parsed in parsed_alarms {
+            reg.insert(
+                sender_thread.to_string(),
+                crate::alarm::Alarm {
+                    workspace_id: shared.workspace_id.clone(),
+                    fire_at: std::time::Instant::now() + parsed.delay,
+                    wake_message: parsed.wake_message,
+                },
+            );
+        }
+    }
     // Run both parsers over the same final-text buffer. Per Step 2 spec, we
     // make NO ordering assumption between propose_plan and send_message
     // within a single turn — Step 3 owns the gate / latch question. Step 2's
@@ -681,7 +782,13 @@ async fn process_final_text(shared: &SharedRouterState, sender_thread: &str, tex
     }
 
     for tag in tags {
-        if !can_send(&shared.subscriptions, &sender.id, &tag.to, &tag.channel) {
+        if !can_send(
+            &shared.subscriptions,
+            &shared.known_agent_ids,
+            &sender.id,
+            &tag.to,
+            &tag.channel,
+        ) {
             eprintln!(
                 "[team-router] send_message ACL denied: {} → {} on channel \"{}\"",
                 sender.id, tag.to, tag.channel
@@ -742,6 +849,377 @@ async fn process_final_text(shared: &SharedRouterState, sender_thread: &str, tex
             );
         }
     }
+}
+
+// ===========================================================================
+// Phase 7 S6-2 — structured tool-call path (DORMANT until S6-3).
+//
+// The counterpart to `process_final_text` (the text-tag path) for the
+// structured `send_message` / `propose_plan` MCP tools. It graduates the eval
+// harness's `scan_mcp_tool_calls` observer
+// (`bin/opencrab-eval/assertions.rs`) to a production-reachable place, then
+// reuses the EXISTING routing chain unchanged — `can_send` ACL → approval
+// gate → `[From X]` framing → `send_user_message_core` for send_message, and
+// `handle_propose_plan_blocks` for propose_plan — and records each routed
+// message into the S6-1 `chats` read-DB.
+//
+// DORMANT: S6-2 does NOT register the `opencrab-team` MCP server and does NOT
+// change the comm guide (both land atomically in S6-3). So the model never
+// emits these tool calls, `parse_team_tool_call` returns `None` for every
+// real event, the consumer's tool buffer stays empty, and
+// `process_team_tool_calls` is a no-op. Zero production behaviour change.
+//
+// (The whole chain is wired into the live consumer, so it is reachable code —
+// no `#[allow(dead_code)]` needed; the dormancy is runtime — empty input —
+// not compile-time unreachability.)
+// ===========================================================================
+
+/// The MCP server name the team tools are hosted under (the stub binary
+/// `opencrab-team-mcp`; registered in S6-3). Only tool calls from this server
+/// are routed here.
+const TEAM_MCP_SERVER: &str = "opencrab-team";
+
+/// One observed `opencrab-team` MCP tool call lifted off the per-thread tap.
+struct TeamToolCall {
+    tool: String,
+    arguments: Value,
+}
+
+/// `send_message` tool arguments. Note `body` — the structured counterpart of
+/// the text-tag's inner `content` (the rename the S6-2 mapping bridges).
+#[derive(Debug, Deserialize)]
+struct SendMessageArgs {
+    to: String,
+    channel: String,
+    body: String,
+}
+
+/// `propose_plan` tool arguments — the structured counterpart of a
+/// `<propose_plan>` block.
+#[derive(Debug, Deserialize)]
+struct ProposePlanArgs {
+    tasks: Vec<ProposePlanTaskArg>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProposePlanTaskArg {
+    title: String,
+    body: String,
+    #[serde(default)]
+    assignee: Option<String>,
+}
+
+/// Plain-ref routing context for `decide_send_message`, so the decision is
+/// unit-testable without constructing a `SharedRouterState` (which needs a
+/// live Tauri `AppHandle`). Mirrors the fields `process_final_text` reads.
+struct RouteCtx<'a> {
+    subscriptions: &'a [Subscription],
+    known_agent_ids: &'a HashSet<String>,
+    by_agent_id: &'a HashMap<String, String>,
+    workspace_id: &'a str,
+    team_id: &'a str,
+}
+
+/// What to do with one observed `send_message` tool call. The async caller
+/// (`process_team_tool_calls`) executes the side effects; this decision is
+/// pure so the ACL / approval-gate / target-resolution / chats-row logic is
+/// testable with synthetic input.
+enum SendMessageOutcome {
+    /// `can_send` denied — dropped, nothing recorded.
+    AclDenied,
+    /// Sender has a plan awaiting approval — dropped, system note sent.
+    ApprovalGated,
+    /// `to == "user"`: no Codex thread, but recorded so the PM↔user
+    /// conversation renders from `chats` (the structured path does not leak
+    /// the message into the visible transcript the way the text tag did).
+    UserTarget { chat: crate::chats::store::NewChat },
+    /// Route the framed body to a teammate's thread, and record it.
+    Dispatch {
+        target_thread: String,
+        framed: String,
+        chat: crate::chats::store::NewChat,
+    },
+    /// Recipient is a known teammate but has no bound thread — dropped.
+    NoTargetThread,
+}
+
+/// Graduated from the eval harness's `scan_mcp_tool_calls`
+/// (`bin/opencrab-eval/assertions.rs`): recognize ONE `item/completed`
+/// notification carrying a `mcpToolCall` item from the `opencrab-team`
+/// server, and lift `(tool, arguments)`. `None` for everything else —
+/// non-completed items, non-MCP items, other servers (e.g. `opencrab-memory`)
+/// — which is every event in production today, since the team MCP server is
+/// unregistered until S6-3 (this path is dormant).
+fn parse_team_tool_call(event: &Value) -> Option<TeamToolCall> {
+    if event.get("method").and_then(Value::as_str) != Some("item/completed") {
+        return None;
+    }
+    let item = event.get("params")?.get("item")?;
+    if item.get("type").and_then(Value::as_str) != Some("mcpToolCall") {
+        return None;
+    }
+    if item.get("server").and_then(Value::as_str) != Some(TEAM_MCP_SERVER) {
+        return None;
+    }
+    let tool = item.get("tool").and_then(Value::as_str)?.to_string();
+    let arguments = item.get("arguments").cloned().unwrap_or(Value::Null);
+    Some(TeamToolCall { tool, arguments })
+}
+
+/// Split observed tool calls into (propose_plan args, send_message args),
+/// preserving relative order within each bucket. Draining the plan bucket
+/// fully before the message bucket is how the approve-before-dispatch
+/// invariant is guaranteed at the turn boundary (a plan latched this turn
+/// gates a message sent the same turn) — the structured analogue of
+/// `process_final_text` running `parse_propose_plan_blocks` before
+/// `parse_send_message_tags`, so the ordering does NOT depend on the order
+/// the tool-call events happen to arrive. Unknown tools are logged + dropped.
+fn partition_tool_calls(calls: Vec<TeamToolCall>) -> (Vec<Value>, Vec<Value>) {
+    let mut plans = Vec::new();
+    let mut msgs = Vec::new();
+    for c in calls {
+        match c.tool.as_str() {
+            "propose_plan" => plans.push(c.arguments),
+            "send_message" => msgs.push(c.arguments),
+            other => eprintln!("[team-router] ignoring unknown opencrab-team tool: {other}"),
+        }
+    }
+    (plans, msgs)
+}
+
+/// Map `propose_plan` tool args → the existing `ParsedPlan` shape so the
+/// unchanged `handle_propose_plan_blocks` writer can consume it.
+fn propose_plan_args_to_plan(args: ProposePlanArgs) -> ParsedPlan {
+    ParsedPlan {
+        tasks: args
+            .tasks
+            .into_iter()
+            .map(|t| super::plan_parser::ParsedPlanTask {
+                title: t.title,
+                assignee: t.assignee,
+                body: t.body,
+            })
+            .collect(),
+    }
+}
+
+/// Decide what to do with one `send_message` tool call. Pure: mirrors the
+/// per-tag body of `process_final_text` (approval gate → `can_send` → user
+/// short-circuit → target resolution → framing) over structured args, and
+/// emits the `chats` row for the routed cases. `has_pending_approval` is
+/// computed by the async caller from `sender_has_pending_approvals`.
+fn decide_send_message(
+    ctx: &RouteCtx<'_>,
+    sender: &AgentInfo,
+    args: &SendMessageArgs,
+    has_pending_approval: bool,
+    ts: &str,
+) -> SendMessageOutcome {
+    // Approval gate first — mirrors process_final_text's pre-loop latch check:
+    // a sender with a plan awaiting approval may not hand off work.
+    if has_pending_approval {
+        return SendMessageOutcome::ApprovalGated;
+    }
+    // Map tool args → the existing ParsedTag shape (note `body` → `content`).
+    let tag = ParsedTag {
+        to: args.to.clone(),
+        channel: args.channel.clone(),
+        content: args.body.clone(),
+    };
+    if !can_send(
+        ctx.subscriptions,
+        ctx.known_agent_ids,
+        &sender.id,
+        &tag.to,
+        &tag.channel,
+    ) {
+        return SendMessageOutcome::AclDenied;
+    }
+    let chat = crate::chats::store::NewChat {
+        workspace_id: ctx.workspace_id.to_string(),
+        team_id: ctx.team_id.to_string(),
+        thread_id: Some(sender.thread_id.clone()),
+        sender: sender.id.clone(),
+        recipient: Some(tag.to.clone()),
+        role: None,
+        kind: crate::chats::store::ChatKind::SendMessage,
+        content: tag.content.clone(),
+        ts: ts.to_string(),
+    };
+    if tag.to == USER_PUBLISHER {
+        return SendMessageOutcome::UserTarget { chat };
+    }
+    let Some(target_thread) = ctx.by_agent_id.get(&tag.to).cloned() else {
+        return SendMessageOutcome::NoTargetThread;
+    };
+    let framed = format!("[From {}]\n{}", sender.name, tag.content);
+    SendMessageOutcome::Dispatch {
+        target_thread,
+        framed,
+        chat,
+    }
+}
+
+/// Append a chat row best-effort: `chats` is a render layer, never a source of
+/// truth, so a write failure logs and is swallowed — it must never fail the
+/// dispatch it accompanies. Runs the `!Send` rusqlite work in `spawn_blocking`.
+async fn append_chat_best_effort(shared: &SharedRouterState, chat: crate::chats::store::NewChat) {
+    let Some(root) = resolve_workspace_path(shared).await else {
+        return;
+    };
+    match tokio::task::spawn_blocking(move || crate::chats::store::append_chat_at_path(&root, chat))
+        .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(err)) => eprintln!("[team-router] chats append failed: {err}"),
+        Err(err) => eprintln!("[team-router] chats append task panicked: {err}"),
+    }
+}
+
+/// Structured-tool turn handler — the counterpart to `process_final_text`,
+/// called at `turn/completed` with the tool calls buffered during the turn.
+/// DORMANT: `calls` is always empty until S6-3 registers the team MCP server.
+async fn process_team_tool_calls(
+    shared: &SharedRouterState,
+    sender_thread: &str,
+    calls: Vec<TeamToolCall>,
+) {
+    if calls.is_empty() {
+        return;
+    }
+    let Some(sender) = shared.by_thread.get(sender_thread).cloned() else {
+        // Tap fired for an unknown thread — nothing we can do with it.
+        return;
+    };
+
+    // Plans FIRST, then messages — guarantees approve-before-dispatch within a
+    // turn (a plan latched here gates a same-turn message below).
+    let (plans, msgs) = partition_tool_calls(calls);
+
+    for args_val in plans {
+        match serde_json::from_value::<ProposePlanArgs>(args_val) {
+            Ok(args) => {
+                let plan = propose_plan_args_to_plan(args);
+                handle_propose_plan_blocks(shared, &sender.id, vec![Ok(plan)]).await;
+            }
+            Err(err) => eprintln!("[team-router] tool propose_plan: bad args: {err}"),
+        }
+    }
+
+    // S6-3b (D) — compute the approval-gate state ONCE per turn (the plans
+    // above already latched; nothing in the message loop un-latches), and merge
+    // all gated drops into ONE system note after the loop — matching the
+    // text-tag gate's single per-turn reply rather than one note per dropped
+    // message (S6-2 carried this as a per-message divergence).
+    let has_pending = sender_has_pending_approvals(shared, &sender.id).await;
+    let mut gated_count = 0usize;
+
+    for args_val in msgs {
+        let args: SendMessageArgs = match serde_json::from_value(args_val) {
+            Ok(a) => a,
+            Err(err) => {
+                eprintln!("[team-router] tool send_message: bad args: {err}");
+                continue;
+            }
+        };
+        let ts = chrono::Utc::now().to_rfc3339();
+        let ctx = RouteCtx {
+            subscriptions: &shared.subscriptions,
+            known_agent_ids: &shared.known_agent_ids,
+            by_agent_id: &shared.by_agent_id,
+            workspace_id: &shared.workspace_id,
+            team_id: &shared.team_id,
+        };
+        match decide_send_message(&ctx, &sender, &args, has_pending, &ts) {
+            SendMessageOutcome::AclDenied => {
+                eprintln!(
+                    "[team-router] tool send_message ACL denied: {} → {} on channel \"{}\"",
+                    sender.id, args.to, args.channel
+                );
+            }
+            SendMessageOutcome::ApprovalGated => {
+                // Per-turn merge: count now, send ONE reply after the loop (D).
+                gated_count += 1;
+            }
+            SendMessageOutcome::NoTargetThread => {
+                eprintln!(
+                    "[team-router] tool send_message target {} has no bound thread \
+                     (provisioning gap?)",
+                    args.to
+                );
+            }
+            SendMessageOutcome::UserTarget { chat } => {
+                // No Codex thread to dispatch to; record for the chat UI only.
+                append_chat_best_effort(shared, chat).await;
+            }
+            SendMessageOutcome::Dispatch {
+                target_thread,
+                framed,
+                chat,
+            } => {
+                append_chat_best_effort(shared, chat).await;
+                // Reuse the exact prelude-prepend + dispatch chain
+                // process_final_text uses.
+                let framed = {
+                    let team_routers = {
+                        let state = shared.app_handle.state::<AppState>();
+                        state.team_routers.clone()
+                    };
+                    team_routers
+                        .prepend_prelude_if_stale(
+                            &shared.app_handle,
+                            &shared.workspace_id,
+                            &target_thread,
+                            framed,
+                        )
+                        .await
+                };
+                let state = shared.app_handle.state::<AppState>();
+                let dispatch = send_user_message_core(
+                    &state.sessions,
+                    &state.workspaces,
+                    shared.workspace_id.clone(),
+                    target_thread.clone(),
+                    framed,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+                drop(state);
+                if let Err(err) = dispatch {
+                    eprintln!(
+                        "[team-router] tool dispatch to {} ({}) failed: {}",
+                        args.to, target_thread, err
+                    );
+                }
+            }
+        }
+    }
+
+    // S6-3b (D) — one merged approval-gate note for the whole turn.
+    if let Some(body) = build_gated_reply(gated_count) {
+        let _ = dispatch_system_reply(shared, &sender.id, body).await;
+    }
+}
+
+/// Merged approval-gate reply for a turn: `None` when nothing was gated, else
+/// ONE `[From system]` note covering all `gated` dropped messages — per-turn,
+/// matching the text-tag gate's single reply rather than one note per dropped
+/// message (S6-2 carried this as a per-message divergence; S6-3b converges it).
+fn build_gated_reply(gated: usize) -> Option<String> {
+    if gated == 0 {
+        return None;
+    }
+    Some(format!(
+        "[From system]\n{gated} message(s) you sent this turn were dropped — you have \
+         task(s) pending user approval. Wait for the approval result before handing off \
+         work to teammates.",
+    ))
 }
 
 /// Wire shape of the `tasks-proposed` Tauri event payload. Stays here next
@@ -1315,7 +1793,25 @@ impl TeamRouters {
     }
 }
 
-fn can_send(subs: &[Subscription], from: &str, to: &str, channel: &str) -> bool {
+/// Phase 7 S1 — `<send_message>` routing permit.
+///
+/// Peer messaging: ANY team member may message ANY other team member, so a
+/// recipient that is a known team agent is permitted outright — topology- and
+/// channel-independent (`channels` are metadata, never a routing gate). This
+/// relaxes the pre-P7 rule (routing == subscription topology, which only wired
+/// PM↔Dev). The `user` pseudo-node stays topology-gated: only an agent the team
+/// wired to the user (the PM) may message the user, so "the user talks only to
+/// the PM" still holds.
+fn can_send(
+    subs: &[Subscription],
+    known_agent_ids: &HashSet<String>,
+    from: &str,
+    to: &str,
+    channel: &str,
+) -> bool {
+    if known_agent_ids.contains(to) {
+        return true;
+    }
     subs.iter().any(|s| {
         s.publisher == from
             && s.subscribers.iter().any(|sub| sub == to)
@@ -1470,13 +1966,28 @@ between
     }
 
     #[test]
-    fn can_send_matches_publisher_subscriber_channel() {
+    fn can_send_permits_any_peer_and_keeps_user_topology_gated() {
+        // Topology wires only PM↔{user,dev}, but every agent is a known member.
         let s = subs(&[("pm", &["user", "dev"], &["chat"])]);
-        assert!(can_send(&s, "pm", "user", "chat"));
-        assert!(can_send(&s, "pm", "dev", "chat"));
-        assert!(!can_send(&s, "pm", "qa", "chat"));
-        assert!(!can_send(&s, "pm", "user", "secret"));
-        assert!(!can_send(&s, "dev", "pm", "chat"));
+        let agents: HashSet<String> = ["pm", "dev", "qa"]
+            .iter()
+            .map(|a| (*a).to_string())
+            .collect();
+
+        // Peer messaging: ANY agent → ANY agent, ignoring topology + channel.
+        assert!(can_send(&s, &agents, "pm", "dev", "chat")); // PM→Dev (also had a sub)
+        assert!(can_send(&s, &agents, "dev", "pm", "anything")); // Dev→PM, no sub, any channel
+        assert!(can_send(&s, &agents, "dev", "qa", "x")); // Dev→QA peer, no sub
+        assert!(can_send(&s, &agents, "qa", "dev", "")); // QA→Dev peer, no sub
+
+        // An unknown recipient is still denied.
+        assert!(!can_send(&s, &agents, "pm", "ghost", "chat"));
+
+        // The `user` pseudo-node stays topology-gated — only the PM (wired to
+        // the user) may message the user; channel still matters for that path.
+        assert!(can_send(&s, &agents, "pm", "user", "chat")); // PM→user: has sub
+        assert!(!can_send(&s, &agents, "dev", "user", "chat")); // Dev→user: no sub → denied
+        assert!(!can_send(&s, &agents, "pm", "user", "secret")); // wrong channel → denied
     }
 
     // -- Step 3 latch predicate ---------------------------------------------
@@ -1514,6 +2025,259 @@ between
     fn map_has_proposer_false_when_empty() {
         let m = pending_map(&[]);
         assert!(!map_has_proposer(&m, "anyone"));
+    }
+
+    // -- S6-2 structured tool-call path ------------------------------------
+
+    fn agent_info(id: &str, name: &str, thread: &str) -> AgentInfo {
+        AgentInfo {
+            id: id.to_string(),
+            name: name.to_string(),
+            thread_id: thread.to_string(),
+            freshly_provisioned: false,
+        }
+    }
+
+    fn send_args(to: &str, channel: &str, body: &str) -> SendMessageArgs {
+        SendMessageArgs {
+            to: to.to_string(),
+            channel: channel.to_string(),
+            body: body.to_string(),
+        }
+    }
+
+    fn route_ctx<'a>(
+        subscriptions: &'a [Subscription],
+        known: &'a HashSet<String>,
+        by_id: &'a HashMap<String, String>,
+    ) -> RouteCtx<'a> {
+        RouteCtx {
+            subscriptions,
+            known_agent_ids: known,
+            by_agent_id: by_id,
+            workspace_id: "ws-1",
+            team_id: "team-1",
+        }
+    }
+
+    fn known_set(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|a| (*a).to_string()).collect()
+    }
+
+    #[test]
+    fn parse_team_tool_call_lifts_opencrab_team_calls() {
+        let ev = serde_json::json!({
+            "method": "item/completed",
+            "params": { "item": {
+                "type": "mcpToolCall",
+                "server": "opencrab-team",
+                "tool": "send_message",
+                "arguments": { "to": "bob", "channel": "chat", "body": "hi" }
+            }}
+        });
+        let tc = parse_team_tool_call(&ev).expect("should lift the opencrab-team call");
+        assert_eq!(tc.tool, "send_message");
+        assert_eq!(tc.arguments.get("to").and_then(Value::as_str), Some("bob"));
+        assert_eq!(tc.arguments.get("body").and_then(Value::as_str), Some("hi"));
+    }
+
+    #[test]
+    fn parse_team_tool_call_ignores_non_team_and_non_toolcalls() {
+        // Wrong server (the memory MCP) — ignored.
+        let other_server = serde_json::json!({
+            "method": "item/completed",
+            "params": { "item": {
+                "type": "mcpToolCall", "server": "opencrab-memory",
+                "tool": "memory_search", "arguments": {}
+            }}
+        });
+        assert!(parse_team_tool_call(&other_server).is_none());
+
+        // Not a tool call (an agent message item) — ignored.
+        let msg_item = serde_json::json!({
+            "method": "item/completed",
+            "params": { "item": { "type": "agentMessage", "text": "hello" }}
+        });
+        assert!(parse_team_tool_call(&msg_item).is_none());
+
+        // Not an item/completed (a delta) — ignored.
+        let delta = serde_json::json!({
+            "method": "item/agentMessage/delta",
+            "params": { "delta": "hi" }
+        });
+        assert!(parse_team_tool_call(&delta).is_none());
+    }
+
+    #[test]
+    fn decide_send_message_routes_permitted_peer_to_dispatch() {
+        let s = subs(&[("pm", &["user", "dev"], &["chat"])]);
+        let known = known_set(&["pm", "dev"]);
+        let mut by_id = HashMap::new();
+        by_id.insert("dev".to_string(), "thread-dev".to_string());
+        let ctx = route_ctx(&s, &known, &by_id);
+        let pm = agent_info("pm", "Alice", "thread-pm");
+        let args = send_args("dev", "chat", "ship it");
+        match decide_send_message(&ctx, &pm, &args, false, "2026-06-05T10:00:00Z") {
+            SendMessageOutcome::Dispatch {
+                target_thread,
+                framed,
+                chat,
+            } => {
+                assert_eq!(target_thread, "thread-dev");
+                assert_eq!(framed, "[From Alice]\nship it");
+                // body → content rename + chat row fields.
+                assert_eq!(chat.content, "ship it");
+                assert_eq!(chat.sender, "pm");
+                assert_eq!(chat.recipient.as_deref(), Some("dev"));
+                assert_eq!(chat.thread_id.as_deref(), Some("thread-pm"));
+                assert_eq!(chat.kind.as_str(), "send_message");
+            }
+            _ => panic!("expected Dispatch"),
+        }
+    }
+
+    #[test]
+    fn decide_send_message_denies_unknown_recipient() {
+        let s = subs(&[("pm", &["user"], &["chat"])]);
+        let known = known_set(&["pm", "dev"]);
+        let by_id = HashMap::new();
+        let ctx = route_ctx(&s, &known, &by_id);
+        let pm = agent_info("pm", "Alice", "thread-pm");
+        let args = send_args("ghost", "chat", "hi");
+        assert!(matches!(
+            decide_send_message(&ctx, &pm, &args, false, "t"),
+            SendMessageOutcome::AclDenied
+        ));
+    }
+
+    #[test]
+    fn decide_send_message_user_target_records_without_dispatch() {
+        let s = subs(&[("pm", &["user"], &["chat"])]);
+        let known = known_set(&["pm"]);
+        let by_id = HashMap::new();
+        let ctx = route_ctx(&s, &known, &by_id);
+        let pm = agent_info("pm", "Alice", "thread-pm");
+        let args = send_args("user", "chat", "done!");
+        match decide_send_message(&ctx, &pm, &args, false, "t") {
+            SendMessageOutcome::UserTarget { chat } => {
+                assert_eq!(chat.recipient.as_deref(), Some("user"));
+                assert_eq!(chat.content, "done!");
+                assert_eq!(chat.sender, "pm");
+            }
+            _ => panic!("expected UserTarget"),
+        }
+    }
+
+    #[test]
+    fn decide_send_message_gates_when_pending_approval() {
+        let s = subs(&[("pm", &["dev"], &["chat"])]);
+        let known = known_set(&["pm", "dev"]);
+        let mut by_id = HashMap::new();
+        by_id.insert("dev".to_string(), "thread-dev".to_string());
+        let ctx = route_ctx(&s, &known, &by_id);
+        let pm = agent_info("pm", "Alice", "thread-pm");
+        let args = send_args("dev", "chat", "go");
+        // has_pending = true → gated even though ACL permits and a thread exists.
+        assert!(matches!(
+            decide_send_message(&ctx, &pm, &args, true, "t"),
+            SendMessageOutcome::ApprovalGated
+        ));
+    }
+
+    #[test]
+    fn decide_send_message_no_thread_for_known_agent() {
+        let s = subs(&[]);
+        let known = known_set(&["pm", "dev"]);
+        let by_id = HashMap::new(); // dev is a known member but has no bound thread
+        let ctx = route_ctx(&s, &known, &by_id);
+        let pm = agent_info("pm", "Alice", "thread-pm");
+        let args = send_args("dev", "chat", "hi");
+        assert!(matches!(
+            decide_send_message(&ctx, &pm, &args, false, "t"),
+            SendMessageOutcome::NoTargetThread
+        ));
+    }
+
+    #[test]
+    fn partition_tool_calls_orders_plans_before_messages() {
+        let calls = vec![
+            TeamToolCall {
+                tool: "send_message".into(),
+                arguments: serde_json::json!({"to":"dev","channel":"chat","body":"m1"}),
+            },
+            TeamToolCall {
+                tool: "propose_plan".into(),
+                arguments: serde_json::json!({"tasks":[]}),
+            },
+            TeamToolCall {
+                tool: "send_message".into(),
+                arguments: serde_json::json!({"to":"dev","channel":"chat","body":"m2"}),
+            },
+        ];
+        let (plans, msgs) = partition_tool_calls(calls);
+        // The split is what guarantees plans are handled before any message
+        // (the orchestrator drains `plans` fully before `msgs`).
+        assert_eq!(plans.len(), 1);
+        assert_eq!(msgs.len(), 2);
+        // Relative order within the message bucket is preserved.
+        assert_eq!(msgs[0].get("body").and_then(Value::as_str), Some("m1"));
+        assert_eq!(msgs[1].get("body").and_then(Value::as_str), Some("m2"));
+    }
+
+    #[test]
+    fn propose_plan_args_map_to_parsed_plan() {
+        let args = ProposePlanArgs {
+            tasks: vec![
+                ProposePlanTaskArg {
+                    title: "A".into(),
+                    body: "do a".into(),
+                    assignee: Some("dev".into()),
+                },
+                ProposePlanTaskArg {
+                    title: "B".into(),
+                    body: "do b".into(),
+                    assignee: None,
+                },
+            ],
+        };
+        let plan = propose_plan_args_to_plan(args);
+        assert_eq!(plan.tasks.len(), 2);
+        assert_eq!(plan.tasks[0].title, "A");
+        assert_eq!(plan.tasks[0].body, "do a");
+        assert_eq!(plan.tasks[0].assignee.as_deref(), Some("dev"));
+        assert!(plan.tasks[1].assignee.is_none());
+    }
+
+    #[test]
+    fn build_user_input_chat_keys_row_under_target_agent() {
+        // A human message to "pm" is recorded under pm's thread, addressed to
+        // pm, as kind=user_input from sender "user".
+        let chat = build_user_input_chat(
+            "ws-1",
+            "team-1",
+            "thread-pm",
+            "pm",
+            "build me an app",
+            "2026-06-05T10:00:00Z",
+        );
+        assert_eq!(chat.sender, "user");
+        assert_eq!(chat.recipient.as_deref(), Some("pm"));
+        assert_eq!(chat.thread_id.as_deref(), Some("thread-pm"));
+        assert_eq!(chat.kind.as_str(), "user_input");
+        assert_eq!(chat.content, "build me an app");
+        assert_eq!(chat.workspace_id, "ws-1");
+        assert_eq!(chat.team_id, "team-1");
+    }
+
+    #[test]
+    fn build_gated_reply_merges_per_turn() {
+        // Nothing gated → no reply.
+        assert!(build_gated_reply(0).is_none());
+        // N gated → ONE reply naming the count (not N separate notes).
+        let body = build_gated_reply(3).expect("a reply when >0 gated");
+        assert!(body.starts_with("[From system]"));
+        assert!(body.contains("3 message(s)"));
+        assert!(body.contains("pending user approval"));
     }
 
     // -- Step 3 §10.3: per-workspace latch isolation -----------------------

@@ -23,6 +23,19 @@ use std::sync::Arc;
 use serde_json::Value;
 use tokio::sync::{mpsc, Mutex};
 
+/// Phase 7 S1 "foundation" — per-thread turn lifecycle state.
+///
+/// The host-side single source of truth for (a) whether a thread currently
+/// has an active turn (the alarm idle-check, future block) and (b) that
+/// turn's id (the escape-hatch `turn/interrupt`). An entry's *presence* means
+/// a turn is in flight; `clear_turn_active` removes the entry on the terminal
+/// `turn/completed` (or a non-retryable `error`) notification.
+#[derive(Debug, Clone)]
+pub(crate) struct TurnState {
+    pub(crate) active: bool,
+    pub(crate) turn_id: Option<String>,
+}
+
 /// Per-session routing state.  Cheap to clone via `Arc`.
 pub(crate) struct SessionRouting {
     /// The "owning" workspace this transport was originally spawned for.
@@ -49,6 +62,12 @@ pub(crate) struct SessionRouting {
     /// `background_thread_callbacks`, taps run **alongside** the UI emit —
     /// they never suppress notifications from reaching the frontend.
     pub(crate) tap_thread_callbacks: Mutex<HashMap<String, Vec<mpsc::UnboundedSender<Value>>>>,
+    /// Phase 7 S1 — `thread_id → TurnState`. Lives here (not in the team-only
+    /// `SharedRouterState`) so normal-mode threads AND `turn_interrupt_core`
+    /// read the same source of truth. Written on the `turn/start` ack
+    /// (`set_turn_active`) and the terminal `turn/completed` / non-retryable
+    /// `error` notification (`clear_turn_active`).
+    pub(crate) turn_state: Mutex<HashMap<String, TurnState>>,
 }
 
 impl SessionRouting {
@@ -62,6 +81,7 @@ impl SessionRouting {
             hidden_thread_ids: Mutex::new(HashSet::new()),
             background_thread_callbacks: Mutex::new(HashMap::new()),
             tap_thread_callbacks: Mutex::new(HashMap::new()),
+            turn_state: Mutex::new(HashMap::new()),
             owner_workspace_id,
         })
     }
@@ -184,6 +204,64 @@ impl SessionRouting {
             }
         }
     }
+
+    // ── Phase 7 S1 — per-thread turn-state helpers ──────────────────────
+
+    /// Write① — record a freshly started turn. Called from the `turn/start`
+    /// convergence point (`send_user_message_core`). A new turn supersedes any
+    /// prior entry for the thread.
+    pub(crate) async fn set_turn_active(&self, thread_id: String, turn_id: String) {
+        self.turn_state.lock().await.insert(
+            thread_id,
+            TurnState {
+                active: true,
+                turn_id: Some(turn_id),
+            },
+        );
+    }
+
+    /// Write② — clear a thread's turn-state on a terminal notification.
+    /// Reconciles by turn id: when `completed_turn_id` is `Some`, only clear
+    /// if it matches the recorded turn id, so a late `turn/completed` from a
+    /// superseded turn cannot wipe a turn that started after it. `None` (the
+    /// non-retryable `error` fallback / thread archival) clears unconditionally.
+    pub(crate) async fn clear_turn_active(&self, thread_id: &str, completed_turn_id: Option<&str>) {
+        let mut map = self.turn_state.lock().await;
+        let should_clear = match map.get(thread_id) {
+            None => false,
+            Some(state) => match completed_turn_id {
+                None => true,
+                Some(done) => match state.turn_id.as_deref() {
+                    Some(current) => current == done,
+                    None => true,
+                },
+            },
+        };
+        if should_clear {
+            map.remove(thread_id);
+        }
+    }
+
+    /// The active turn id for `thread_id`, if a turn is in flight. Source for
+    /// the system-initiated escape hatch (`interrupt_thread_core`).
+    pub(crate) async fn current_turn_id(&self, thread_id: &str) -> Option<String> {
+        self.turn_state
+            .lock()
+            .await
+            .get(thread_id)
+            .and_then(|state| state.turn_id.clone())
+    }
+
+    /// Whether `thread_id` currently has an active turn. Source for the alarm
+    /// idle-check (must not `turn/start` while active — that would
+    /// `Replaced`-abort the in-flight turn).
+    pub(crate) async fn is_active(&self, thread_id: &str) -> bool {
+        self.turn_state
+            .lock()
+            .await
+            .get(thread_id)
+            .is_some_and(|state| state.active)
+    }
 }
 
 /// Normalize a filesystem root for cross-platform comparison.
@@ -252,6 +330,61 @@ mod tests {
             .await
             .get("ws-other")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn turn_state_set_then_matching_completion_clears() {
+        let routing = SessionRouting::new("ws-1".to_string());
+        assert!(!routing.is_active("t1").await);
+        assert_eq!(routing.current_turn_id("t1").await, None);
+
+        routing
+            .set_turn_active("t1".to_string(), "turn-1".to_string())
+            .await;
+        assert!(routing.is_active("t1").await);
+        assert_eq!(
+            routing.current_turn_id("t1").await,
+            Some("turn-1".to_string())
+        );
+
+        // A `turn/completed` whose id matches the recorded turn clears it.
+        routing.clear_turn_active("t1", Some("turn-1")).await;
+        assert!(!routing.is_active("t1").await);
+        assert_eq!(routing.current_turn_id("t1").await, None);
+    }
+
+    #[tokio::test]
+    async fn turn_state_stale_completion_does_not_clear_current() {
+        let routing = SessionRouting::new("ws-1".to_string());
+        routing
+            .set_turn_active("t1".to_string(), "turn-2".to_string())
+            .await;
+
+        // A late `turn/completed` for a SUPERSEDED turn (turn-1) must not wipe
+        // the freshly started turn-2.
+        routing.clear_turn_active("t1", Some("turn-1")).await;
+        assert!(routing.is_active("t1").await);
+        assert_eq!(
+            routing.current_turn_id("t1").await,
+            Some("turn-2".to_string())
+        );
+
+        // The matching completion does clear it.
+        routing.clear_turn_active("t1", Some("turn-2")).await;
+        assert_eq!(routing.current_turn_id("t1").await, None);
+    }
+
+    #[tokio::test]
+    async fn turn_state_error_fallback_clears_unconditionally() {
+        let routing = SessionRouting::new("ws-1".to_string());
+        routing
+            .set_turn_active("t1".to_string(), "turn-3".to_string())
+            .await;
+
+        // The non-retryable `error` path passes `None` → clears regardless of id.
+        routing.clear_turn_active("t1", None).await;
+        assert!(!routing.is_active("t1").await);
+        assert_eq!(routing.current_turn_id("t1").await, None);
     }
 
     #[tokio::test]

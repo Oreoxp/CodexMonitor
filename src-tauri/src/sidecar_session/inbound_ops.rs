@@ -132,31 +132,45 @@ async fn handle_codex_start_thread(state: &AppState, params: &Value) -> Result<V
             }
         }
     }
-    // Phase 6 Step 1 — register the per-agent memory MCP server. codex's
-    // `thread/start` `config` map takes dotted-path config overrides;
-    // `mcp_servers.opencrab-memory` is merged into THIS thread's
-    // `Config.mcp_servers` before its session prompt is frozen, so the
-    // agent gets `log_progress` / `memory_search` / `memory_get` tools
-    // scoped to its own `~/.opencrab/agents/<id>/memory.db`. Best-effort:
-    // if the binary cannot be located or the agent id is invalid, log and
-    // skip — the thread still starts, just without the memory tools.
+    // S6-3b — register BOTH the per-agent memory MCP server and the
+    // `opencrab-team` MCP server (the `send_message` / `propose_plan` tools)
+    // into the SINGLE `config` map codex's `thread/start` consumes. Both are
+    // gated on this being a team thread (`agent_id` present) and both are
+    // best-effort: a resolve/build failure logs + skips THAT server, leaving
+    // the other (and the thread start) intact. They go under distinct
+    // `mcp_servers.<name>` keys via `build_agent_mcp_config`, so the team
+    // registration never clobbers the memory entry (the merge-not-overwrite
+    // fix — the pre-S6-3b code inserted a one-entry `config` directly).
     if let Some(agent_id) = agent_id.as_deref() {
-        match crate::memory_mcp_binary::resolve_memory_mcp_binary_path() {
-            Ok(binary) => match crate::codex_spawn::build_memory_mcp_server_entry(
-                &binary, agent_id,
-            ) {
-                Ok(entry) => {
-                    let mut config = Map::new();
-                    config.insert("mcp_servers.opencrab-memory".to_string(), entry);
-                    start_params.insert("config".to_string(), Value::Object(config));
+        let memory_entry = match crate::memory_mcp_binary::resolve_memory_mcp_binary_path() {
+            Ok(binary) => {
+                match crate::codex_spawn::build_memory_mcp_server_entry(&binary, agent_id) {
+                    Ok(entry) => Some(entry),
+                    Err(err) => {
+                        eprintln!(
+                        "[memory-mcp] agent={agent_id}: {err}; thread/start without memory search"
+                    );
+                        None
+                    }
                 }
-                Err(err) => eprintln!(
+            }
+            Err(err) => {
+                eprintln!(
                     "[memory-mcp] agent={agent_id}: {err}; thread/start without memory search"
-                ),
-            },
-            Err(err) => eprintln!(
-                "[memory-mcp] agent={agent_id}: {err}; thread/start without memory search"
-            ),
+                );
+                None
+            }
+        };
+        let team_entry = match crate::team_mcp_binary::resolve_team_mcp_binary_path() {
+            Ok(binary) => Some(crate::codex_spawn::build_team_mcp_server_entry(&binary)),
+            Err(err) => {
+                eprintln!("[team-mcp] agent={agent_id}: {err}; thread/start without team tools");
+                None
+            }
+        };
+        let config = crate::codex_spawn::build_agent_mcp_config(memory_entry, team_entry);
+        if !config.is_empty() {
+            start_params.insert("config".to_string(), Value::Object(config));
         }
     }
     let raw = session

@@ -146,6 +146,25 @@ export function buildConversationItem(
   if (type === "mcpToolCall") {
     const server = asString(item.server ?? "");
     const tool = asString(item.tool ?? "");
+    // S6-3b — team comms are structured tools. Render `send_message` as a
+    // normal assistant bubble (its `body` arg is the message); suppress
+    // `propose_plan`'s raw tool row entirely — the plan surfaces through the
+    // plan-review modal via the `tasks` pipeline (S6-2 `handle_propose_plan_blocks`),
+    // not as a conversation item. Non-team tool calls fall through unchanged.
+    if (server === "opencrab-team") {
+      if (tool === "send_message") {
+        const args = (item.arguments ?? {}) as Record<string, unknown>;
+        return {
+          id,
+          kind: "message",
+          role: "assistant",
+          text: asString(args.body ?? ""),
+        };
+      }
+      if (tool === "propose_plan") {
+        return null;
+      }
+    }
     const args = item.arguments ? JSON.stringify(item.arguments, null, 2) : "";
     return {
       id,

@@ -366,6 +366,11 @@ pub(crate) async fn send_user_message(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<Value, String> {
+    // S6-3a — capture the human's original message for the chats render-DB
+    // (recorded below in the local path, team threads only) BEFORE the prelude
+    // prepend shadows `text` with the memory-augmented turn input.
+    let chat_text = text.clone();
+
     // Phase 5 Step 3 Block C — re-injection: when the user sends into a
     // team-agent thread whose daily-memory prelude has gone stale (post-
     // compaction, cross-day, or resumed-first-message), prepend today's
@@ -407,6 +412,15 @@ pub(crate) async fn send_user_message(
         )
         .await;
     }
+
+    // S6-3a — record the human's team message into the chats render-DB
+    // (best-effort; team threads only — normal solo chats are skipped). The
+    // structured agent side of chats lives in team_router (S6-2). Uses the
+    // ORIGINAL `chat_text`, not the prelude-augmented `text`.
+    state
+        .team_routers
+        .record_user_chat_best_effort(&workspace_id, &thread_id, &chat_text)
+        .await;
 
     codex_core::send_user_message_core(
         &state.sessions,
@@ -509,6 +523,28 @@ pub(crate) async fn turn_interrupt(
     }
 
     codex_core::turn_interrupt_core(&state.sessions, workspace_id, thread_id, turn_id).await
+}
+
+/// Phase 7 S1 — system-initiated escape hatch. The frontend supplies only the
+/// thread id; the host resolves the active turn id from per-thread turn-state
+/// (`SessionRouting`) and stops it. `Ok(true)` = an interrupt was sent;
+/// `Ok(false)` = the thread was idle (nothing to stop).
+#[tauri::command]
+pub(crate) async fn interrupt_thread(
+    workspace_id: String,
+    thread_id: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    if remote_backend::is_remote_mode(&*state).await {
+        // Per-thread turn-state lives on whichever host started the turns; in
+        // remote mode that's the daemon, not here. Forwarding an
+        // `interrupt_thread` RPC to the daemon is a follow-up — until then the
+        // UI's existing `turn_interrupt` (frontend-tracked turn id) is the
+        // remote path.
+        return Err("interrupt_thread is not yet supported in remote mode".to_string());
+    }
+
+    codex_core::interrupt_thread_core(&state.sessions, workspace_id, thread_id).await
 }
 
 #[tauri::command]

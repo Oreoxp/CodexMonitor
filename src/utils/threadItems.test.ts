@@ -29,6 +29,46 @@ describe("threadItems", () => {
     }
   });
 
+  // S6-3b — opencrab-team structured tools render specially (send_message →
+  // bubble, propose_plan → suppressed); other tool calls are unaffected.
+  it("renders an opencrab-team send_message tool call as an assistant bubble", () => {
+    const result = buildConversationItem({
+      id: "tc-1",
+      type: "mcpToolCall",
+      server: "opencrab-team",
+      tool: "send_message",
+      arguments: { to: "bob", channel: "chat", body: "hello bob" },
+    });
+    expect(result).not.toBeNull();
+    expect(result?.kind).toBe("message");
+    if (result?.kind === "message") {
+      expect(result.role).toBe("assistant");
+      expect(result.text).toBe("hello bob");
+    }
+  });
+
+  it("suppresses an opencrab-team propose_plan tool call (plan UI handles it)", () => {
+    const result = buildConversationItem({
+      id: "tc-2",
+      type: "mcpToolCall",
+      server: "opencrab-team",
+      tool: "propose_plan",
+      arguments: { tasks: [] },
+    });
+    expect(result).toBeNull();
+  });
+
+  it("leaves a non-team mcpToolCall as a tool row", () => {
+    const result = buildConversationItem({
+      id: "tc-3",
+      type: "mcpToolCall",
+      server: "opencrab-memory",
+      tool: "memory_search",
+      arguments: { query: "x" },
+    });
+    expect(result?.kind).toBe("tool");
+  });
+
   it("truncates extremely large tool output for fileChange and commandExecution", () => {
     const output = "x".repeat(250000);
     const item: ConversationItem = {

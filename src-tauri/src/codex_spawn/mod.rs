@@ -353,5 +353,44 @@ pub(crate) fn build_memory_mcp_server_entry(
     }))
 }
 
+/// S6-3b — build the `opencrab-team` MCP server entry for a team agent's
+/// `thread/start` config. Mirrors [`build_memory_mcp_server_entry`] but for the
+/// shared `opencrab-team-mcp` stub: the stub takes **no args** (it is
+/// workspace-agnostic — agents identify via the per-thread Codex context, see
+/// `bin/opencrab-team-mcp/main.rs`), so there is no `agent_id` to validate and
+/// `args` is empty. `default_tools_approval_mode = "approve"` is REQUIRED for
+/// the same reason memory needs it (P6-hang-9): `send_message` / `propose_plan`
+/// fire on background / auto turns where no human can answer an approval
+/// prompt, so without the auto-approve short-circuit the call wedges forever at
+/// the MCP approval gate.
+pub(crate) fn build_team_mcp_server_entry(binary_path: &Path) -> serde_json::Value {
+    serde_json::json!({
+        "command": binary_path.display().to_string(),
+        "args": [],
+        "default_tools_approval_mode": "approve",
+    })
+}
+
+/// S6-3b — merge the per-agent MCP server entries into the single `config` map
+/// codex's `thread/start` consumes. Each entry is optional (a resolve/build
+/// failure upstream → `None` → that server is skipped); both go under distinct
+/// `mcp_servers.<name>` keys so registering the team server never clobbers the
+/// memory server. This is the merge-not-overwrite invariant: the pre-S6-3b code
+/// built a fresh one-entry map and `insert`ed `config` directly, so a naive
+/// second registration would have overwritten memory.
+pub(crate) fn build_agent_mcp_config(
+    memory_entry: Option<serde_json::Value>,
+    team_entry: Option<serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut config = serde_json::Map::new();
+    if let Some(entry) = memory_entry {
+        config.insert("mcp_servers.opencrab-memory".to_string(), entry);
+    }
+    if let Some(entry) = team_entry {
+        config.insert("mcp_servers.opencrab-team".to_string(), entry);
+    }
+    config
+}
+
 #[cfg(test)]
 mod tests;

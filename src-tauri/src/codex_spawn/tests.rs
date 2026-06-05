@@ -6,10 +6,56 @@ use std::path::Path;
 use tempfile::tempdir;
 
 use super::{
-    agent_team_session_dir, build_memory_mcp_server_entry, ensure_agent_team_session_dir,
-    ensure_team_session_dir, project_hash, team_session_dir_for_workspace, CodexSpawnError,
-    PROJECT_HASH_LEN_HEX,
+    agent_team_session_dir, build_agent_mcp_config, build_memory_mcp_server_entry,
+    build_team_mcp_server_entry, ensure_agent_team_session_dir, ensure_team_session_dir,
+    project_hash, team_session_dir_for_workspace, CodexSpawnError, PROJECT_HASH_LEN_HEX,
 };
+
+// ---------------------------------------------------------------------------
+// S6-3b — team MCP server entry + merge-not-overwrite config
+// ---------------------------------------------------------------------------
+
+#[test]
+fn build_team_mcp_server_entry_has_command_empty_args_and_approve() {
+    let entry = build_team_mcp_server_entry(Path::new("/opt/bin/opencrab-team-mcp"));
+    assert_eq!(
+        entry["command"].as_str(),
+        Some("/opt/bin/opencrab-team-mcp")
+    );
+    assert_eq!(entry["args"], serde_json::json!([]));
+    // `approve` is REQUIRED — without it the tool wedges on the MCP approval
+    // gate on background / auto turns (P6-hang-9, same as the memory server).
+    assert_eq!(
+        entry["default_tools_approval_mode"].as_str(),
+        Some("approve")
+    );
+    // Exactly the three keys, nothing else.
+    assert_eq!(entry.as_object().unwrap().len(), 3);
+}
+
+#[test]
+fn build_agent_mcp_config_keeps_both_servers_without_clobber() {
+    let memory = serde_json::json!({ "command": "mem" });
+    let team = serde_json::json!({ "command": "team" });
+    let config = build_agent_mcp_config(Some(memory.clone()), Some(team.clone()));
+    // Both servers present under distinct keys — registering team must NOT
+    // overwrite memory (the pre-S6-3b single-entry bug).
+    assert_eq!(config.get("mcp_servers.opencrab-memory"), Some(&memory));
+    assert_eq!(config.get("mcp_servers.opencrab-team"), Some(&team));
+    assert_eq!(config.len(), 2);
+}
+
+#[test]
+fn build_agent_mcp_config_skips_absent_entries() {
+    // memory failed to resolve, team registered — only team present.
+    let team = serde_json::json!({ "command": "team" });
+    let config = build_agent_mcp_config(None, Some(team));
+    assert!(!config.contains_key("mcp_servers.opencrab-memory"));
+    assert!(config.contains_key("mcp_servers.opencrab-team"));
+    assert_eq!(config.len(), 1);
+    // Both absent → empty (caller skips the `config` insert entirely).
+    assert!(build_agent_mcp_config(None, None).is_empty());
+}
 
 // ---------------------------------------------------------------------------
 // project_hash
