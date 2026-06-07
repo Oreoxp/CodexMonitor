@@ -1,0 +1,1742 @@
+/* ============================================================
+   OpenCrab Team Mode — P7 design-system base layer (Carrier).
+   1:1 port of design_handoff_team_mode/chrome.css, but every
+   rule is scoped under `.team-ui` so it is fully ADDITIVE and
+   never touches Normal mode. Tokens + shared atoms + app shell
+   (window / sidebar / main).
+
+   Frost = REAL vibrancy via the existing transparent Tauri
+   window (`transparent:true`, base.css `.app{background:transparent}`)
+   + backdrop-filter. No fake IDE backdrop, no window-vibrancy crate
+   (per phased-plan P7: "vibrancy already exists — out of scope").
+
+   Collision note: only `.sidebar` (styles/sidebar.css) and `.main`
+   (styles/main.css) are bare-global classes that overlap design
+   names. `.team-ui .sidebar` / `.team-ui .main` (specificity 0,2,0)
+   fully override them below (incl. neutralizing the global
+   backdrop-filter:none / display:grid / transition).
+   ============================================================ */
+
+.team-ui {
+  /* ---------- tokens (chrome.css :root, scoped) ---------- */
+  --bg-ide: #1c1d21;
+  --panel: rgba(247, 247, 249, 0.62);
+  --panel-solid: #f4f4f6;
+  --sidebar: rgba(243, 243, 246, 0.55);
+  --card: rgba(255, 255, 255, 0.72);
+  --card-solid: #ffffff;
+
+  --ink: #1c1c1e;
+  --ink-2: #5c5c63;
+  --ink-3: #8b8b93;
+  --ink-4: #a9a9b1;
+
+  --line: rgba(0, 0, 0, 0.075);
+  --line-2: rgba(0, 0, 0, 0.12);
+  --hair: rgba(0, 0, 0, 0.05);
+
+  --blue: #0a84ff;
+  --blue-press: #0060df;
+  --green: #30c659;
+  --amber: #ff9f0a;
+  --gray-dot: #b4b4bc;
+  --purple: #a972ff;
+  --red: #ff453a;
+
+  --r-win: 13px;
+  --r-card: 11px;
+  --r-sm: 7px;
+  --r-pill: 999px;
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.05), 0 6px 18px rgba(0, 0, 0, 0.06);
+  --shadow-pop: 0 8px 30px rgba(0, 0, 0, 0.16), 0 2px 6px rgba(0, 0, 0, 0.08);
+
+  --font: -apple-system, "SF Pro Text", "SF Pro Display", "Helvetica Neue",
+    system-ui, sans-serif;
+  --mono: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, monospace;
+
+  height: var(--app-height, 100dvh);
+  font-family: var(--font);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+.team-ui *,
+.team-ui *::before,
+.team-ui *::after {
+  box-sizing: border-box;
+}
+
+/* ---------- window ---------- */
+.team-ui .win {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: var(--r-win);
+  overflow: hidden;
+  /* transparent: the real desktop/IDE shows through the frosted panels */
+  background: transparent;
+  display: flex;
+  isolation: isolate;
+}
+
+/* ---------- sidebar (overrides bare global .sidebar) ---------- */
+.team-ui .sidebar {
+  position: relative;
+  z-index: 2;
+  width: 264px;
+  flex: 0 0 264px;
+  min-height: 0;
+  background: var(--sidebar);
+  backdrop-filter: blur(40px) saturate(1.7);
+  -webkit-backdrop-filter: blur(40px) saturate(1.7);
+  border-right: 0.5px solid var(--line-2);
+  display: flex;
+  flex-direction: column;
+  padding: 14px 12px 12px;
+  /* neutralize global .sidebar transition/backdrop */
+  transition: none;
+  overflow: hidden;
+  -webkit-app-region: no-drag;
+}
+
+.team-ui .sb-mode {
+  display: flex;
+  gap: 0;
+  align-self: center;
+  background: rgba(0, 0, 0, 0.06);
+  border-radius: 8px;
+  padding: 2px;
+  margin: 10px 0 16px;
+}
+.team-ui .sb-mode button {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink-2);
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 4px 16px;
+  border-radius: 6px;
+}
+.team-ui .sb-mode button.on {
+  background: #fff;
+  color: var(--ink);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
+}
+
+.team-ui .sb-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 6px 10px;
+}
+.team-ui .sb-head .t {
+  font-size: 15px;
+  font-weight: 600;
+  flex: 1;
+}
+.team-ui .sb-ico {
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  color: var(--ink-3);
+  cursor: pointer;
+  border: none;
+  background: transparent;
+}
+.team-ui .sb-ico:hover {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--ink-2);
+}
+.team-ui .sb-ico svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* team-mode project switcher + nav */
+.team-ui .proj-sw {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 14.5px;
+  font-weight: 600;
+  padding: 2px 8px 12px;
+  color: var(--ink);
+}
+.team-ui .proj-sw svg {
+  width: 13px;
+  height: 13px;
+  color: var(--ink-3);
+}
+.team-ui .proj-sw .tag {
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #0a5bb5;
+  background: rgba(10, 132, 255, 0.12);
+  border-radius: 5px;
+  padding: 1px 6px;
+}
+
+.team-ui .sb-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+}
+.team-ui .nav {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13.5px;
+  color: var(--ink-2);
+  width: 100%;
+  text-align: left;
+}
+.team-ui .nav svg {
+  width: 17px;
+  height: 17px;
+  color: var(--ink-3);
+  flex: 0 0 auto;
+}
+.team-ui .nav:hover {
+  background: rgba(0, 0, 0, 0.045);
+}
+.team-ui .nav.on {
+  background: rgba(10, 132, 255, 0.1);
+  color: var(--ink);
+  font-weight: 500;
+}
+.team-ui .nav.on svg {
+  color: var(--blue);
+}
+.team-ui .nav:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.team-ui .nav:disabled:hover {
+  background: transparent;
+}
+.team-ui .nav .lab {
+  flex: 1;
+}
+.team-ui .nav .n {
+  font-size: 11px;
+  color: var(--ink-4);
+  font-variant-numeric: tabular-nums;
+}
+.team-ui .nav .n.unread {
+  background: var(--blue);
+  color: #fff;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  padding: 0 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.team-ui .sb-foot {
+  border-top: 0.5px solid var(--line);
+  padding-top: 10px;
+  margin-top: 6px;
+}
+.team-ui .usage-l {
+  font-size: 10.5px;
+  color: var(--ink-3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.team-ui .usage-r {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-top: 3px;
+}
+.team-ui .usage-r .k {
+  font-size: 13px;
+  font-weight: 500;
+}
+.team-ui .usage-r .v {
+  font-size: 12px;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+.team-ui .sb-btns {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+.team-ui .sb-btns button {
+  flex: 1;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--ink-2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 8px;
+  border: 0.5px solid var(--line-2);
+  background: rgba(255, 255, 255, 0.5);
+  cursor: pointer;
+}
+.team-ui .sb-btns button svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* ---------- main (overrides bare global .main grid) ---------- */
+.team-ui .main {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  backdrop-filter: blur(36px) saturate(1.5);
+  -webkit-backdrop-filter: blur(36px) saturate(1.5);
+}
+
+/* ---------- shared atoms ---------- */
+.team-ui .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  display: inline-block;
+}
+.team-ui .dot.run {
+  background: var(--green);
+  box-shadow: 0 0 0 3px rgba(48, 198, 89, 0.18);
+}
+.team-ui .dot.wait {
+  background: var(--amber);
+  box-shadow: 0 0 0 3px rgba(255, 159, 10, 0.18);
+}
+.team-ui .dot.idle {
+  background: var(--gray-dot);
+}
+.team-ui .dot.paused {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--ink-4);
+}
+
+@keyframes team-ui-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.team-ui .live {
+  animation: team-ui-pulse 1.6s ease-in-out infinite;
+}
+
+.team-ui .badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ink-2);
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  background: rgba(0, 0, 0, 0.045);
+  border: 0.5px solid var(--hair);
+  white-space: nowrap;
+}
+.team-ui .badge .mdl {
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+.team-ui .badge.auto-1 {
+  color: #b06a00;
+  background: rgba(255, 159, 10, 0.12);
+  border-color: rgba(255, 159, 10, 0.2);
+}
+.team-ui .badge.auto-2 {
+  color: #0a5bb5;
+  background: rgba(10, 132, 255, 0.1);
+  border-color: rgba(10, 132, 255, 0.18);
+}
+.team-ui .badge.auto-3 {
+  color: #1f8a4c;
+  background: rgba(48, 198, 89, 0.12);
+  border-color: rgba(48, 198, 89, 0.2);
+}
+
+.team-ui .btn {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 13px;
+  border-radius: 8px;
+  border: 0.5px solid var(--line-2);
+  background: rgba(255, 255, 255, 0.6);
+  color: var(--ink);
+}
+.team-ui .btn svg {
+  width: 15px;
+  height: 15px;
+}
+.team-ui .btn.primary {
+  background: var(--blue);
+  color: #fff;
+  border-color: transparent;
+  box-shadow: 0 1px 2px rgba(10, 132, 255, 0.35);
+}
+.team-ui .btn.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--ink-2);
+}
+.team-ui .btn.ghost:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.team-ui .seg {
+  display: inline-flex;
+  background: rgba(0, 0, 0, 0.06);
+  border-radius: 8px;
+  padding: 2px;
+}
+.team-ui .seg button {
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink-2);
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 4px 12px;
+  border-radius: 6px;
+}
+.team-ui .seg button.on {
+  background: #fff;
+  color: var(--ink);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+}
+
+.team-ui .avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  font-weight: 600;
+  font-size: 13px;
+  color: #fff;
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.25);
+}
+
+.team-ui .toggle {
+  width: 34px;
+  height: 20px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.14);
+  position: relative;
+  flex: 0 0 auto;
+  cursor: pointer;
+  transition: background 0.15s;
+  border: none;
+}
+.team-ui .toggle::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: left 0.15s;
+}
+.team-ui .toggle.on {
+  background: var(--green);
+}
+.team-ui .toggle.on::after {
+  left: 16px;
+}
+
+.team-ui .mono {
+  font-family: var(--mono);
+}
+.team-ui .tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- carrier-block placeholders (Roster/Office fill in ②③) ---------- */
+.team-ui .tm-placeholder {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  text-align: center;
+  padding: 40px;
+}
+.team-ui .tm-placeholder-title {
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+.team-ui .tm-placeholder-sub {
+  font-size: 12.5px;
+  color: var(--ink-3);
+  max-width: 360px;
+  line-height: 1.5;
+}
+
+/* ============================================================
+   Roster (组织架构) — ported from Roster.html inline <style>,
+   scoped under .team-ui. 1:1 values.
+   ============================================================ */
+.team-ui .cfg-head {
+  padding: 16px 24px 0 24px;
+  border-bottom: 0.5px solid var(--line);
+}
+.team-ui .cfg-head .row1 {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+.team-ui .cfg-head .crumb {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+.team-ui .cfg-head h1 {
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+}
+.team-ui .cfg-head .spacer {
+  flex: 1;
+}
+.team-ui .tabs {
+  display: flex;
+  gap: 2px;
+  margin-top: 14px;
+}
+.team-ui .tabs button {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink-3);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 8px 12px;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.team-ui .tabs button.on {
+  color: var(--ink);
+  border-bottom-color: var(--blue);
+}
+.team-ui .tabs button:disabled {
+  color: var(--ink-4);
+  cursor: default;
+}
+.team-ui .tabs .count {
+  font-size: 11px;
+  color: var(--ink-4);
+  margin-left: 5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.team-ui .scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 18px 24px 24px;
+}
+
+/* metrics */
+.team-ui .metrics {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 18px;
+}
+.team-ui .metric {
+  background: var(--card);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 0.5px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.team-ui .metric .k {
+  font-size: 11px;
+  color: var(--ink-3);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.team-ui .metric .n {
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin-top: 5px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.team-ui .metric .n small {
+  font-size: 13px;
+  color: var(--ink-3);
+  font-weight: 500;
+  margin-left: 3px;
+}
+.team-ui .metric .spark {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 18px;
+  margin-top: 8px;
+}
+.team-ui .metric .spark i {
+  flex: 1;
+  background: rgba(10, 132, 255, 0.35);
+  border-radius: 1px;
+}
+
+/* toolbar */
+.team-ui .toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.team-ui .search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background: var(--card-solid);
+  border: 0.5px solid var(--line-2);
+  border-radius: 8px;
+  padding: 7px 11px;
+  width: 230px;
+}
+.team-ui .search svg {
+  width: 14px;
+  height: 14px;
+  color: var(--ink-3);
+}
+.team-ui .search input {
+  font: inherit;
+  font-size: 13px;
+  border: none;
+  background: transparent;
+  flex: 1;
+  color: var(--ink);
+  outline: none;
+}
+.team-ui .chips {
+  display: flex;
+  gap: 6px;
+}
+.team-ui .chip {
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink-2);
+  background: rgba(0, 0, 0, 0.045);
+  border: 0.5px solid var(--hair);
+  border-radius: 999px;
+  padding: 5px 11px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.team-ui .chip.on {
+  background: rgba(10, 132, 255, 0.12);
+  border-color: rgba(10, 132, 255, 0.2);
+  color: #0a5bb5;
+}
+.team-ui .toolbar .spacer {
+  flex: 1;
+}
+
+/* table */
+.team-ui .tbl {
+  background: var(--card-solid);
+  border: 0.5px solid var(--line-2);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: var(--shadow-card);
+}
+.team-ui .thead,
+.team-ui .trow {
+  display: grid;
+  grid-template-columns: 30px 1.9fr 2.2fr 1.2fr 1fr 1.3fr 0.9fr 34px;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+}
+.team-ui .thead {
+  height: 38px;
+  border-bottom: 0.5px solid var(--line);
+  background: rgba(0, 0, 0, 0.018);
+}
+.team-ui .thead span {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-4);
+}
+.team-ui .grp-h {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 16px 7px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink-3);
+  background: rgba(0, 0, 0, 0.012);
+  border-bottom: 0.5px solid var(--hair);
+}
+.team-ui .grp-h .c {
+  font-size: 10.5px;
+  color: var(--ink-4);
+  background: rgba(0, 0, 0, 0.05);
+  border-radius: 5px;
+  padding: 1px 6px;
+}
+.team-ui .grp-h .ll {
+  flex: 1;
+  height: 1px;
+}
+
+.team-ui .trow {
+  height: 54px;
+  border-bottom: 0.5px solid var(--line);
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.team-ui .trow:hover {
+  background: rgba(10, 132, 255, 0.035);
+}
+.team-ui .trow.open {
+  background: rgba(10, 132, 255, 0.05);
+}
+.team-ui .trow.last {
+  border-bottom: none;
+}
+.team-ui .chk {
+  width: 15px;
+  height: 15px;
+  border-radius: 4px;
+  border: 1.5px solid var(--line-2);
+}
+.team-ui .cell-agent {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.team-ui .cell-agent .avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+.team-ui .cell-agent .nm {
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.1;
+}
+.team-ui .cell-agent .role {
+  font-size: 11px;
+  color: var(--ink-3);
+  margin-top: 1px;
+}
+.team-ui .cell-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.team-ui .cell-status .txt {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.team-ui .cell-status .txt.muted {
+  color: var(--ink-4);
+}
+.team-ui .cell-status .lbl {
+  font-size: 11px;
+  font-weight: 500;
+  flex: 0 0 auto;
+}
+.team-ui .cell-mono {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--ink-2);
+}
+.team-ui .cell-ws {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.team-ui .cell-use {
+  font-size: 12px;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.team-ui .row-more {
+  color: var(--ink-4);
+  font-size: 16px;
+  text-align: center;
+}
+.team-ui .report-tag {
+  font-size: 10px;
+  color: var(--ink-4);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* expanded inline panel (React renders it only when open) */
+.team-ui .expand {
+  border-bottom: 0.5px solid var(--line);
+  background: rgba(10, 132, 255, 0.025);
+  padding: 4px 16px 18px;
+}
+.team-ui .expand .grid {
+  display: grid;
+  grid-template-columns: 1.1fr 1fr 1.3fr;
+  gap: 16px;
+  padding-top: 12px;
+}
+.team-ui .ex-card .lab {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-4);
+  margin-bottom: 8px;
+}
+.team-ui .ex-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 0;
+  border-bottom: 0.5px solid var(--hair);
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+.team-ui .ex-row:last-child {
+  border-bottom: none;
+}
+.team-ui .ex-row .v {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink);
+}
+.team-ui .ex-row .v.mono {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--ink-2);
+}
+.team-ui .auto-seg {
+  display: flex;
+  background: rgba(0, 0, 0, 0.05);
+  border-radius: 8px;
+  padding: 2px;
+  margin-bottom: 8px;
+}
+.team-ui .auto-seg button {
+  flex: 1;
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--ink-2);
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 6px;
+}
+.team-ui .auto-seg button.on {
+  background: #fff;
+  color: var(--ink);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+}
+.team-ui .auto-seg button:disabled {
+  cursor: default;
+}
+.team-ui .log {
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--ink-3);
+  background: rgba(0, 0, 0, 0.025);
+  border-radius: 8px;
+  padding: 9px 11px;
+  max-height: 104px;
+  overflow: hidden;
+}
+.team-ui .log b {
+  color: var(--green);
+  font-weight: 400;
+}
+.team-ui .log .t {
+  color: var(--ink-4);
+}
+.team-ui .ex-actions {
+  display: flex;
+  gap: 9px;
+  margin-top: 14px;
+  align-items: center;
+}
+.team-ui .ex-actions .open-thread {
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--blue);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.team-ui .ex-actions .spacer {
+  flex: 1;
+}
+.team-ui .btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* ---------- stage (banner + screen) ---------- */
+.team-ui .tm-stage {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.team-ui .tm-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 16px;
+  font-size: 12.5px;
+  background: rgba(255, 159, 10, 0.14);
+  border-bottom: 0.5px solid rgba(255, 159, 10, 0.28);
+  color: #8a5a00;
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+.team-ui .tm-banner-info {
+  background: rgba(10, 132, 255, 0.1);
+  border-bottom-color: rgba(10, 132, 255, 0.2);
+  color: #0a5bb5;
+}
+.team-ui .tm-banner-body {
+  flex: 1;
+}
+.team-ui .tm-banner-dismiss {
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 4px;
+}
+
+/* ============================================================
+   Office (办公室) — DM three-column. Ported from Office.html inline
+   <style>, scoped under .team-ui. Channel + reasoning panel = out of
+   scope this block (placeholders). 1:1 values.
+   ============================================================ */
+.team-ui .office {
+  flex: 1;
+  display: flex;
+  min-width: 0;
+}
+
+/* ---- chat list column ---- */
+.team-ui .olist {
+  width: 296px;
+  flex: 0 0 296px;
+  border-right: 0.5px solid var(--line-2);
+  display: flex;
+  flex-direction: column;
+  background: rgba(250, 250, 252, 0.4);
+}
+.team-ui .ol-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 16px 10px;
+}
+.team-ui .ol-head h1 {
+  font-size: 17px;
+  font-weight: 600;
+  flex: 1;
+}
+.team-ui .ol-head .ico {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  display: grid;
+  place-items: center;
+  color: var(--ink-3);
+  cursor: pointer;
+  border: none;
+  background: transparent;
+}
+.team-ui .ol-head .ico:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+.team-ui .ol-head .ico svg {
+  width: 16px;
+  height: 16px;
+}
+.team-ui .ol-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 14px 8px;
+}
+.team-ui .ol-tabs button {
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink-2);
+  background: rgba(0, 0, 0, 0.05);
+  border: none;
+  border-radius: 999px;
+  padding: 5px 13px;
+  cursor: pointer;
+}
+.team-ui .ol-tabs button.on {
+  background: var(--ink);
+  color: #fff;
+}
+.team-ui .ol-tabs button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.team-ui .ol-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 8px 10px;
+}
+.team-ui .ol-sec {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-4);
+  padding: 10px 8px 5px;
+}
+.team-ui .ci {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 9px 9px;
+  border-radius: 9px;
+  cursor: pointer;
+  margin-bottom: 1px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  text-align: left;
+}
+.team-ui .ci:hover {
+  background: rgba(0, 0, 0, 0.035);
+}
+.team-ui .ci.on {
+  background: rgba(10, 132, 255, 0.1);
+}
+.team-ui .ci.disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+.team-ui .ava-wrap {
+  position: relative;
+  flex: 0 0 auto;
+}
+.team-ui .ava-wrap .corner {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 2px solid #fafafc;
+}
+.team-ui .ava-wrap .corner.run {
+  background: var(--green);
+}
+.team-ui .ava-wrap .corner.wait {
+  background: var(--amber);
+}
+.team-ui .ava-wrap .corner.idle {
+  background: var(--gray-dot);
+}
+.team-ui .ci.on .ava-wrap .corner {
+  border-color: #eaf2ff;
+}
+.team-ui .ci-body {
+  flex: 1;
+  min-width: 0;
+}
+.team-ui .ci-top {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.team-ui .ci-name {
+  font-size: 13.5px;
+  font-weight: 600;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.team-ui .ci-role {
+  font-size: 10.5px;
+  color: var(--ink-4);
+  font-weight: 500;
+}
+.team-ui .ci-time {
+  font-size: 10.5px;
+  color: var(--ink-4);
+  flex: 0 0 auto;
+}
+.team-ui .ci-sub {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+.team-ui .ci-msg {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.team-ui .ci-msg.live {
+  color: var(--ink-2);
+}
+.team-ui .n.unread {
+  background: var(--blue);
+  color: #fff;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  padding: 0 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  flex: 0 0 auto;
+}
+.team-ui .n.unread.warn {
+  background: var(--amber);
+}
+.team-ui .ch-tile {
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--ink-3);
+  font-size: 18px;
+  font-weight: 600;
+  flex: 0 0 auto;
+}
+.team-ui .ch-stack {
+  display: flex;
+}
+.team-ui .ch-stack .avatar {
+  width: 21px;
+  height: 21px;
+  border-radius: 7px;
+  font-size: 10px;
+  margin-left: -7px;
+  box-shadow: 0 0 0 2px #fafafc;
+}
+.team-ui .ch-stack .avatar:first-child {
+  margin-left: 0;
+}
+
+/* ---- thread ---- */
+.team-ui .othread {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.team-ui .ot-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 18px;
+  border-bottom: 0.5px solid var(--line);
+}
+.team-ui .ot-head .avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  font-size: 14px;
+}
+.team-ui .ot-head .nm {
+  font-size: 15px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.team-ui .ot-head .meta {
+  font-size: 11.5px;
+  color: var(--ink-3);
+  margin-top: 1px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.team-ui .ot-head .meta .mono {
+  font-family: var(--mono);
+}
+.team-ui .ot-head .spacer {
+  flex: 1;
+}
+.team-ui .ot-act {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  color: var(--ink-3);
+  cursor: pointer;
+  border: 0.5px solid var(--line);
+  background: rgba(255, 255, 255, 0.5);
+}
+.team-ui .ot-act:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.team-ui .ot-act svg {
+  width: 15px;
+  height: 15px;
+}
+.team-ui .ot-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 22px;
+  display: flex;
+  flex-direction: column;
+}
+.team-ui .daydiv {
+  align-self: center;
+  font-size: 11px;
+  color: var(--ink-4);
+  background: rgba(0, 0, 0, 0.04);
+  border-radius: 999px;
+  padding: 3px 11px;
+  margin: 4px 0 14px;
+}
+.team-ui .msg {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 15px;
+  max-width: 80%;
+}
+.team-ui .msg.them {
+  align-self: flex-start;
+}
+.team-ui .msg.me {
+  align-self: flex-end;
+  flex-direction: row-reverse;
+}
+.team-ui .msg .avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  font-size: 12px;
+  flex: 0 0 auto;
+}
+.team-ui .msg .col {
+  min-width: 0;
+}
+.team-ui .msg .sender {
+  font-size: 11px;
+  color: var(--ink-3);
+  margin: 0 0 4px 2px;
+  font-weight: 500;
+}
+.team-ui .bubble {
+  padding: 9px 13px;
+  border-radius: 15px;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.team-ui .them .bubble {
+  background: #fff;
+  border: 0.5px solid var(--line);
+  border-top-left-radius: 5px;
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.03);
+}
+.team-ui .me .bubble {
+  background: var(--blue);
+  color: #fff;
+  border-top-right-radius: 5px;
+}
+.team-ui .bubble .mention {
+  color: #0a5bb5;
+  background: rgba(10, 132, 255, 0.1);
+  border-radius: 5px;
+  padding: 0 4px;
+  font-weight: 500;
+}
+.team-ui .me .bubble .mention {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.22);
+}
+.team-ui .mtime {
+  font-size: 10px;
+  color: var(--ink-4);
+  margin-top: 5px;
+}
+.team-ui .me .bubble .mtime {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+/* work card inside a bubble */
+.team-ui .work-card {
+  margin-top: 8px;
+  background: rgba(0, 0, 0, 0.025);
+  border: 0.5px solid var(--line);
+  border-radius: 9px;
+  overflow: hidden;
+  min-width: 240px;
+}
+.team-ui .wc-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 11px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--ink-2);
+  border-bottom: 0.5px solid var(--hair);
+}
+.team-ui .wc-head svg {
+  width: 13px;
+  height: 13px;
+  color: var(--ink-3);
+}
+.team-ui .wc-body {
+  padding: 8px 11px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.team-ui .wc-res {
+  padding: 7px 11px;
+  border-top: 0.5px solid var(--hair);
+  font-size: 11.5px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.team-ui .wc-res .ok {
+  color: #1f8a4c;
+  font-weight: 500;
+}
+.team-ui .wc-res .fail {
+  color: var(--red);
+  font-weight: 500;
+}
+.team-ui .wc-res .run {
+  color: var(--ink-3);
+}
+.team-ui .typing {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  align-self: flex-start;
+  margin-bottom: 10px;
+}
+.team-ui .typing .avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  font-size: 12px;
+}
+.team-ui .typing .dots {
+  background: #fff;
+  border: 0.5px solid var(--line);
+  border-radius: 14px;
+  border-top-left-radius: 5px;
+  padding: 11px 14px;
+  display: flex;
+  gap: 4px;
+}
+.team-ui .typing .dots i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ink-4);
+  animation: team-ui-blink 1.3s infinite;
+}
+.team-ui .typing .dots i:nth-child(2) {
+  animation-delay: 0.2s;
+}
+.team-ui .typing .dots i:nth-child(3) {
+  animation-delay: 0.4s;
+}
+@keyframes team-ui-blink {
+  0%,
+  60%,
+  100% {
+    opacity: 0.3;
+  }
+  30% {
+    opacity: 1;
+  }
+}
+
+/* composer */
+.team-ui .composer {
+  border-top: 0.5px solid var(--line);
+  padding: 11px 18px 14px;
+}
+.team-ui .cmp-quick {
+  display: flex;
+  gap: 7px;
+  margin-bottom: 9px;
+}
+.team-ui .cmp-quick .q {
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 999px;
+  padding: 5px 12px;
+  cursor: pointer;
+  border: 0.5px solid var(--line-2);
+  background: rgba(255, 255, 255, 0.6);
+  color: var(--ink-2);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.team-ui .cmp-quick .q:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.team-ui .cmp-quick .q.approve {
+  color: #1f8a4c;
+  background: rgba(48, 198, 89, 0.1);
+  border-color: rgba(48, 198, 89, 0.25);
+}
+.team-ui .cmp-box {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  background: var(--card-solid);
+  border: 0.5px solid var(--line-2);
+  border-radius: 12px;
+  padding: 9px 10px 9px 14px;
+}
+.team-ui .cmp-box textarea {
+  flex: 1;
+  font: inherit;
+  font-size: 13.5px;
+  color: var(--ink);
+  border: none;
+  background: transparent;
+  resize: none;
+  outline: none;
+  padding: 4px 0;
+  max-height: 120px;
+  line-height: 1.4;
+}
+.team-ui .cmp-box .att {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  color: var(--ink-3);
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  flex: 0 0 auto;
+}
+.team-ui .cmp-box .send {
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  background: var(--blue);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  flex: 0 0 auto;
+  border: none;
+}
+.team-ui .cmp-box .send:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.team-ui .cmp-box .send svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* ---- right aside (③b placeholder) ---- */
+.team-ui .oaside {
+  width: 312px;
+  flex: 0 0 312px;
+  border-left: 0.5px solid var(--line-2);
+  overflow-y: auto;
+  background: rgba(250, 250, 252, 0.5);
+  backdrop-filter: blur(40px);
+  -webkit-backdrop-filter: blur(40px);
+}
+.team-ui .oa-head {
+  padding: 15px 16px 12px;
+  border-bottom: 0.5px solid var(--line);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* DM empty state (no agent / no thread) */
+.team-ui .ot-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 40px;
+  font-size: 12.5px;
+  color: var(--ink-3);
+}
+
+/* ---- right aside: thinking panel (③b, #aside-dm) ---- */
+.team-ui .oa-head .t {
+  font-size: 13px;
+  font-weight: 600;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.team-ui .oa-head .live-pill {
+  font-size: 10.5px;
+  color: #1f8a4c;
+  background: rgba(48, 198, 89, 0.12);
+  border-radius: 999px;
+  padding: 2px 8px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 500;
+}
+.team-ui .task-strip {
+  margin: 13px 16px;
+  background: var(--card-solid);
+  border: 0.5px solid var(--line);
+  border-radius: 10px;
+  padding: 11px 13px;
+}
+.team-ui .task-strip .k {
+  font-size: 11px;
+  color: var(--ink-3);
+}
+.team-ui .task-strip .v {
+  font-size: 13px;
+  font-weight: 600;
+  margin-top: 2px;
+}
+.team-ui .task-strip .bar {
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.07);
+  margin-top: 9px;
+  overflow: hidden;
+}
+.team-ui .task-strip .bar i {
+  display: block;
+  height: 100%;
+  background: var(--blue);
+  border-radius: 3px;
+}
+.team-ui .task-strip .sub {
+  font-size: 10.5px;
+  color: var(--ink-4);
+  margin-top: 6px;
+}
+.team-ui .think {
+  padding: 2px 16px 18px;
+}
+.team-ui .tk {
+  display: flex;
+  gap: 11px;
+  padding-bottom: 3px;
+}
+.team-ui .tk .rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 0 0 auto;
+}
+.team-ui .tk .node {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  margin-top: 1px;
+  font-size: 9px;
+  color: #fff;
+}
+.team-ui .tk .node.done {
+  background: var(--green);
+  color: #fff;
+}
+.team-ui .tk .node.active {
+  background: var(--blue);
+  box-shadow: 0 0 0 4px rgba(10, 132, 255, 0.16);
+}
+.team-ui .tk .node.pending {
+  background: transparent;
+  border: 1.5px solid var(--line-2);
+}
+.team-ui .tk .line {
+  width: 1.5px;
+  flex: 1;
+  background: var(--line-2);
+  margin: 3px 0;
+}
+.team-ui .tk.last .line {
+  display: none;
+}
+.team-ui .tk .body {
+  padding-bottom: 16px;
+  min-width: 0;
+}
+.team-ui .tk .ttl {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink);
+}
+.team-ui .tk.pending .ttl {
+  color: var(--ink-4);
+  font-weight: 400;
+}
+.team-ui .tk .reason {
+  font-size: 12px;
+  color: var(--ink-2);
+  line-height: 1.55;
+  margin-top: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.team-ui .tk .tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-2);
+  background: rgba(0, 0, 0, 0.04);
+  border-radius: 6px;
+  padding: 3px 8px;
+  margin-top: 6px;
+  margin-right: 6px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.team-ui .tk .tool svg {
+  width: 12px;
+  height: 12px;
+  color: var(--ink-3);
+  flex: 0 0 auto;
+}
+.team-ui .tk .cursor {
+  display: inline-block;
+  width: 7px;
+  height: 14px;
+  background: var(--blue);
+  vertical-align: -2px;
+  margin-left: 2px;
+  animation: team-ui-cursor 1s steps(1) infinite;
+}
+@keyframes team-ui-cursor {
+  0%,
+  50% {
+    opacity: 1;
+  }
+  50.01%,
+  100% {
+    opacity: 0;
+  }
+}
+.team-ui .think-empty {
+  font-size: 12px;
+  color: var(--ink-4);
+  padding: 8px 4px;
+  line-height: 1.6;
+}
+

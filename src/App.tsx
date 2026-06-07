@@ -40,9 +40,10 @@ import "./styles/compact-base.css";
 import "./styles/compact-phone.css";
 import "./styles/compact-tablet.css";
 import "@/features/team-mode/team-mode.css";
+import "@/features/team-mode/team-ui.css";
 import { useWindowLabel } from "@/features/layout/hooks/useWindowLabel";
 import MainApp from "@app/components/MainApp";
-import TeamMainApp from "@/features/team-mode/components/TeamMainApp";
+import TeamApp from "@/features/team-mode/components/TeamApp";
 import {
   AppModeProvider,
   useAppMode,
@@ -66,7 +67,7 @@ function AppRoot() {
     );
   }
 
-  return mode === "team" ? <TeamMainApp /> : <MainApp />;
+  return mode === "team" ? <TeamApp /> : <MainApp />;
 }
 
 export default function App() {
